@@ -1,12 +1,13 @@
 export const meta = {
   name: 'spec-analyze',
   description: 'Spec-vs-code as a dynamic workflow, A/B-parameterized by args.variant ("prescriptive" default | "goals"): context in parallel, fan-out of N analyzers from the SRS sections, adversarial verification + bounded rework in a pipeline, reverse diff, report. The orchestration skeleton is IDENTICAL across variants — only the two experimental axes differ (axis a = spec style: step-by-step PROCEDURE vs Objective/Contract/Guardrail; axis b = discovery freedom: fixed numeric caps vs budget+judgment).',
-  whenToUse: 'After the interactive preflight (credentials + gh check, fetch_atlassian.py, RF-FLOW-2 confirmation and SRS segmentation into <=10 units). Inputs are passed via args (set args.variant to pick the A/B arm). It does NOT run the fetch nor the user confirmation itself. For an A/B comparison, run both variants on the SAME repo/branch/units, into SEPARATE output dirs.',
+  whenToUse: 'After the interactive preflight (credentials + gh check, fetch_atlassian.py, RF-FLOW-2 confirmation and SRS segmentation into <=10 units). Inputs are passed via args (set args.variant to pick the A/B arm). It does NOT run the fetch nor the user confirmation itself. For an A/B comparison, run both variants on the SAME repo/branch/units, into SEPARATE output dirs. DRIVER HYGIENE: on a re-run of an existing slug, the driver MUST first delete the derived artifacts (findings/, reviews/, comments.md, reverse-diff.md, report.md, srs-improved.md) preserving repo-map/ — roles that overwrite via the Write tool (e.g. redattore: no Bash) are REFUSED by the tool on a pre-existing un-Read file and would silently keep the stale version; leftover prior-run files with different names also pollute the findings/*.md glob read by report/ricognitore.',
   phases: [
     { title: 'Context', detail: 'cartografo || crawler (parallel, independent)', model: 'haiku' },
     { title: 'Analysis', detail: 'fan-out: one analyzer per SRS unit', model: 'opus' },
     { title: 'Verification', detail: 'verifier (opus) per finding + bounded rework (opus, <=1 round)', model: 'opus' },
     { title: 'Reverse diff', detail: 'ricognitore-inverso over the definitive findings', model: 'sonnet' },
+    { title: 'SRS improved', detail: 'redattore: each Work Item restructured into product requirements vs technical specs (srs-improved.md, importable into a new Confluence page)', model: 'sonnet' },
     { title: 'Report', detail: 'final synthesis report.md with RR-4 and RR-5', model: 'sonnet' },
   ],
 }
@@ -109,6 +110,7 @@ const MODELS = {
   verifier: 'opus',
   rework: 'opus',
   ricognitore: 'sonnet',
+  redattore: 'sonnet',
   report: 'sonnet',
 }
 const modelMix = Object.entries(MODELS).map(([k, v]) => `${k}=${v}`).join(', ')
@@ -190,6 +192,17 @@ const VERIFIER_SCHEMA = {
     verdetto: { type: 'string', enum: ['confirmed', 'revise'] },
     reviewPath: { type: 'string' },
     contestazioni: { type: 'string', description: 'if revise: pointed, actionable list of objections; otherwise empty' },
+  },
+}
+
+const REDATTORE_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['srsImprovedPath'],
+  properties: {
+    srsImprovedPath: { type: 'string', description: 'path of the improved SRS markdown written (srs-improved.md)' },
+    sectionsSplit: { type: 'number', description: 'number of Work Items restructured into product/technical' },
+    summary: { type: 'string', description: 'one-line summary (must state that the conservation self-check was done)' },
   },
 }
 
@@ -396,6 +409,30 @@ const P = (VARIANT === 'goals')
   ? { cartografo: cartografoPromptGoals, crawler: crawlerPromptGoals, analizzatore: analizzatorePromptGoals, verifier: verifierPromptGoals, rework: reworkPromptGoals, ricognitore: ricognitorePromptGoals }
   : { cartografo: cartografoPrompt, crawler: crawlerPrompt, analizzatore: analizzatorePrompt, verifier: verifierPrompt, rework: reworkPrompt, ricognitore: ricognitorePrompt }
 
+// Redattore: markdown in, markdown out. The improved SRS is a derivative PROPOSAL
+// the user reviews and imports into a NEW Confluence page (Insert > Markup > Markdown).
+// Variant-agnostic: it restructures the original SRS only, independent of the analysis.
+const redattoreOut = `${base}/srs-improved.md`
+
+const redattorePrompt = `${COMMON}
+
+ROLE: REDATTORE (SRS-IMPROVED) - ADDED STEP, purely editorial restructuring of the SRS. Does NOT use the analysis output.
+TOOLS: Read, Write, Glob, Grep only. Read ONLY ${srsPath} (no findings/reviews/code, no gh, no network).
+
+GOAL
+Rewrite the FULL SRS (${srsPath}) into ${redattoreOut}, ITALIAN markdown, same structure/tone/style, with ONE change: every "[Work Item N]" section is split into two subsections, in order:
+- "### Requisiti di prodotto" — the WHAT/WHY: behavior, business rules, validations, constraints, error semantics, backward-compat as seen by the caller.
+- "### Specifiche tecniche" — the HOW: endpoints, table/column/event/schema identifiers, module names, implementation/merge-ordering/migration notes.
+
+RULES (accuracy first)
+1. REDISTRIBUTE, don't duplicate: each original sentence goes into exactly ONE subsection — nothing left above/outside, nothing repeated, nothing dropped or invented. Roughly same length as the original; if a WI grows a lot you are duplicating — redo it.
+2. Source-faithful: subsections contain ONLY facts written in the SRS (no limits/states/defaults recalled from elsewhere). Mixed sentence → split the sentence, not the meaning. Truly undecidable → put under "Requisiti di prodotto" with "(dettaglio tecnico: ...)".
+3. Verbatim: keep all code identifiers, endpoint paths, SQL and snippets unchanged. Pre-existing sub-headings inside a WI move under the right subsection, demoted one level.
+4. Non-WI sections (Overview, Vincoli, Scenari di test, Change log, ecc.) copied unchanged, except obvious typos ("Inoltree" -> "Inoltre").
+5. No empty subsections: title-only WI → keep its heading + "_(nessun dettaglio nell'SRS)_", no subsections; single-nature WI → emit only the applicable one.
+
+WRITE: the Write tool refuses to overwrite a file not Read this session. If ${redattoreOut} already exists, Read it first, then Write; read it back and confirm it is YOUR content before returning. Output is markdown for a NEW Confluence page (Insert > Markup > Markdown); write ONLY this file. Return the structured object (srsImprovedPath, sectionsSplit, summary).`
+
 const reportPrompt = (results, verdicts, budgetInfo) => `${COMMON}
 
 ROLE: ORCHESTRATOR - REPORT (RF-FLOW-7). Write ${base}/report.md. The report MUST be written in ITALIAN (markdown), using your judgment, reading ${base}/findings/*.md, ${base}/reviews/*.md, ${base}/reverse-diff.md (and ${base}/comments.md for PR evidence).
@@ -411,6 +448,7 @@ MANDATORY STRUCTURE (section headings and prose in Italian)
    - Execution evidence: PRs discovered/enriched/discarded (from comments.md), flagged cuts, caps reached, judgment calls${mergeNote ? `, and this section merge: ${mergeNote}` : ''}.
    - FIDELITY NOTE (Workflow orchestration): unlike the Task-based variant, per-subagent tokens are NOT exposed in-band by the workflow. Report the flow TOTAL as read from the session (/cost) and the per-phase breakdown as visible in /workflows; time is read from the driver (date +%s timestamps) or from /workflows. Do not invent numbers: always state the source.
    - TOKEN CAP (added on top of the original spec): ${budgetInfo} — report this verbatim in the cost evidence, and if anything was skipped for budget, list it explicitly (no silent truncation).
+   - ADDED STEP (redattore, on top of the original spec): ${redattoreOut} (each Work Item restructured into "Requisiti di prodotto" vs "Specifiche tecniche") is generated in PARALLEL with this report — list it among the deliverables in RR-5 noting it may still be in progress at report time; do NOT block on it.
 
 ANALYSIS RESULTS (structured summary, validate against the files):
 ${JSON.stringify(results, null, 2)}
@@ -504,10 +542,20 @@ if (analysisBudgetExhausted()) {
 }
 
 // RF-FLOW-7 — Report (always attempted within REPORT_RESERVE; documents the cap status in RR-5)
+// + ADDED STEP — redattore (srs-improved.md): independent of the report, so the two run in parallel.
+//   Budget gate decided BEFORE building budgetInfo, so a skipped redattore shows up in RR-5.
 phase('Report')
+const skipRedattore = analysisBudgetExhausted()
+if (skipRedattore) { budgetSkipped.push('redattore'); flagBudget('redattore (srs-improved.md)') }
 const budgetInfo = `TOKEN CAP for this run: ${TOKEN_CAP} output tokens (best-effort, enforced at agent-spawn checkpoints; runtime hard-throw only with a user "+Nk" directive). In-workflow spend (budget.spent() delta) at report time: ~${spentHere()}. Cap hit: ${budgetHit ? 'YES' : 'no'}.${budgetSkipped.length ? ` Skipped for budget (NOT silently truncated): ${budgetSkipped.join(', ')}.` : ''} PER-ROLE MODEL MIX: ${modelMix}. CAVEAT: a mixed-model run is NOT cost-comparable 1:1 with a uniform-Opus run — state this when comparing RR-5 against the goals variant.`
-const report = await agent(reportPrompt(okResults, verdicts, budgetInfo), { label: 'report', phase: 'Report', schema: REPORT_SCHEMA, model: MODELS.report })
+const [improved, report] = await parallel([
+  () => skipRedattore
+    ? Promise.resolve(null)
+    : agent(redattorePrompt, { label: 'redattore', phase: 'SRS improved', schema: REDATTORE_SCHEMA, model: MODELS.redattore }),
+  () => agent(reportPrompt(okResults, verdicts, budgetInfo), { label: 'report', phase: 'Report', schema: REPORT_SCHEMA, model: MODELS.report }),
+])
 if (!report) log(`WARNING: report agent failed — ${base}/report.md may be missing; findings/reviews/reverse-diff are still on disk.`)
+if (!improved && !skipRedattore) log(`WARNING: redattore agent failed — ${base}/srs-improved.md may be missing; the rest of the deliverables are unaffected.`)
 
 return {
   variant: VARIANT,
@@ -516,6 +564,8 @@ return {
   slug,
   reportPath: report?.reportPath,
   summary: report?.summary,
+  srsImprovedPath: improved?.srsImprovedPath,
+  srsImprovedSummary: improved?.summary,
   units: units.length,
   analyzed: okResults.length,
   tokenCap: TOKEN_CAP,
