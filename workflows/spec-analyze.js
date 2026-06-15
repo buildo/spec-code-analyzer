@@ -1,7 +1,7 @@
 export const meta = {
   name: 'spec-analyze',
   description: 'Spec-vs-code as a dynamic workflow, A/B-parameterized by args.variant ("prescriptive" default | "goals"): context in parallel, fan-out of N analyzers from the SRS sections, adversarial verification + bounded rework in a pipeline, reverse diff, report. The orchestration skeleton is IDENTICAL across variants — only the two experimental axes differ (axis a = spec style: step-by-step PROCEDURE vs Objective/Contract/Guardrail; axis b = discovery freedom: fixed numeric caps vs budget+judgment).',
-  whenToUse: 'After the interactive preflight (credentials + gh check, fetch_atlassian.py, RF-FLOW-2 confirmation and SRS segmentation into <=10 units). Inputs are passed via args (set args.variant to pick the A/B arm). It does NOT run the fetch nor the user confirmation itself. For an A/B comparison, run both variants on the SAME repo/branch/units, into SEPARATE output dirs. DRIVER HYGIENE: on a re-run of an existing slug, the driver MUST first delete the derived artifacts (findings/, reviews/, comments.md, reverse-diff.md, report.md, srs-improved.md) preserving repo-map/ — roles that overwrite via the Write tool (e.g. redattore: no Bash) are REFUSED by the tool on a pre-existing un-Read file and would silently keep the stale version; leftover prior-run files with different names also pollute the findings/*.md glob read by report/ricognitore.',
+  whenToUse: 'After the interactive preflight (credentials + gh check, fetch_atlassian.py, RF-FLOW-2 confirmation and SRS segmentation into <=10 units). Inputs are passed via args (set args.variant to pick the A/B arm). It does NOT run the fetch nor the user confirmation itself. For an A/B comparison, run both variants on the SAME repo/branch/units, into SEPARATE output dirs. DRIVER HYGIENE: on a re-run of an existing slug, the driver should first delete the derived artifacts (findings/, reviews/, comments.md, reverse-diff.md, report.md, srs-improved.md) preserving repo-map/ — otherwise prior-run files with different names pollute the findings/*.md glob read by report/ricognitore, and Write-tool overwrites of a pre-existing un-Read file can be refused.',
   phases: [
     { title: 'Context', detail: 'cartografo || crawler (parallel, independent)', model: 'haiku' },
     { title: 'Analysis', detail: 'fan-out: one analyzer per SRS unit', model: 'opus' },
@@ -30,6 +30,8 @@ export const meta = {
 // Role names in labels/headers (cartografo, crawler, analizzatore, verifier,
 // ricognitore-inverso) are kept verbatim for traceability to the plugin's
 // agents/*.md and the requirements doc; only the working language is English.
+// The redattore (srs-improved.md) is an ADDED role with no agents/*.md counterpart,
+// variant-agnostic and independent of the analysis (reads only the original SRS).
 // The final report.md is written in ITALIAN on purpose (see reportPrompt).
 // ---------------------------------------------------------------------------
 
@@ -430,6 +432,7 @@ RULES (accuracy first)
 3. Verbatim: keep all code identifiers, endpoint paths, SQL and snippets unchanged. Pre-existing sub-headings inside a WI move under the right subsection, demoted one level.
 4. Non-WI sections (Overview, Vincoli, Scenari di test, Change log, ecc.) copied unchanged, except obvious typos ("Inoltree" -> "Inoltre").
 5. No empty subsections: title-only WI → keep its heading + "_(nessun dettaglio nell'SRS)_", no subsections; single-nature WI → emit only the applicable one.
+6. Self-check before returning: re-scan every original WI against your rewrite to confirm rules 1-2 (nothing dropped, duplicated or invented); state in the summary that this check was done.
 
 WRITE: the Write tool refuses to overwrite a file not Read this session. If ${redattoreOut} already exists, Read it first, then Write; read it back and confirm it is YOUR content before returning. Output is markdown for a NEW Confluence page (Insert > Markup > Markdown); write ONLY this file. Return the structured object (srsImprovedPath, sectionsSplit, summary).`
 
