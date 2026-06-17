@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Analysis', detail: 'fan-out: one analyzer per SRS unit', model: 'opus' },
     { title: 'Verification', detail: 'verifier (opus) per finding + bounded rework (opus, <=1 round)', model: 'opus' },
     { title: 'Reverse diff', detail: 'reverse-scout over the definitive findings', model: 'sonnet' },
-    { title: 'SRS improved', detail: 'editor: each Work Item restructured into product requirements vs technical specs (srs-improved.md, importable into a new Confluence page)', model: 'sonnet' },
+    { title: 'SRS improved', detail: 'editor (sonnet) fed by two haiku readers (SRS digest ∥ reverse-diff extract): each Work Item restructured into product requirements vs technical specs AND enriched with the reverse-diff code->spec behaviors (srs-improved.md, importable into a new Confluence page)', model: 'sonnet' },
     { title: 'Report', detail: 'final synthesis report.md with RR-4 and RR-5', model: 'sonnet' },
   ],
 }
@@ -30,8 +30,10 @@ export const meta = {
 // The role names (cartographer, crawler, analyzer, verifier, reverse-scout) are the
 // English working names of the plugin's agents/*.md roles (originally Italian); only
 // the working language is English. The editor (srs-improved.md) is an ADDED role with
-// no agents/*.md counterpart, variant-agnostic and independent of the analysis (reads
-// only the original SRS). The final report.md is written in ITALIAN on purpose (see reportPrompt).
+// no agents/*.md counterpart, variant-agnostic; it restructures the original SRS AND
+// enriches it with the reverse-diff (code->spec) behaviors. It is itself a sub-pipeline:
+// a sonnet converge step fed by two haiku readers (one per source doc). The final
+// report.md is written in ITALIAN on purpose (see reportPrompt).
 // ---------------------------------------------------------------------------
 
 // Normalize args: the Workflow runtime sometimes delivers the `args` input as a
@@ -111,7 +113,8 @@ const MODELS = {
   verifier: 'opus',
   rework: 'opus',
   reverseScout: 'sonnet',
-  editor: 'sonnet',
+  editorReader: 'haiku', // the two doc-readers spawned under the editor (SRS digest + reverse-diff extract)
+  editor: 'sonnet',      // the converge step that assembles + enriches srs-improved.md
   report: 'sonnet',
 }
 const modelMix = Object.entries(MODELS).map(([k, v]) => `${k}=${v}`).join(', ')
@@ -203,7 +206,73 @@ const EDITOR_SCHEMA = {
   properties: {
     srsImprovedPath: { type: 'string', description: 'path of the improved SRS markdown written (srs-improved.md)' },
     sectionsSplit: { type: 'number', description: 'number of Work Items restructured into product/technical' },
-    summary: { type: 'string', description: 'one-line summary (must state that the conservation self-check was done)' },
+    enrichedFromReverseDiff: { type: 'number', description: 'number of reverse-diff behaviors integrated into the improved SRS (0 if reverse-diff absent)' },
+    summary: { type: 'string', description: 'one-line summary (must state that the conservation self-check was done and how many reverse-diff items were merged)' },
+  },
+}
+
+// Digest emitted by the haiku SRS reader spawned under the editor: it does the
+// mechanical, VERBATIM sentence-split per Work Item so the sonnet converge step
+// only has to assemble + integrate (and verify against the source).
+const SRS_DIGEST_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['workItems'],
+  properties: {
+    workItems: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['heading'],
+        properties: {
+          heading: { type: 'string', description: 'the [Work Item N] heading, verbatim' },
+          product: { type: 'array', items: { type: 'string' }, description: 'WHAT/WHY sentences, verbatim from the SRS' },
+          technical: { type: 'array', items: { type: 'string' }, description: 'HOW sentences, verbatim from the SRS' },
+          subheadings: { type: 'array', items: { type: 'string' }, description: 'pre-existing sub-headings inside the WI, verbatim' },
+        },
+      },
+    },
+    otherSections: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['heading'],
+        properties: {
+          heading: { type: 'string', description: 'non-WI section heading (Overview, Vincoli, Scenari di test, Change log, ...)' },
+          body: { type: 'string', description: 'the section body verbatim (to be copied unchanged)' },
+        },
+      },
+    },
+  },
+}
+
+// Digest emitted by the haiku reverse-diff reader spawned under the editor: the
+// behaviors that ARE in code but ABSENT from the SRS, each mapped to the WI it
+// best belongs to (or "none" for a tail section).
+const REVDIFF_DIGEST_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['present', 'behaviors'],
+  properties: {
+    present: { type: 'boolean', description: 'true if reverse-diff.md existed and was non-empty' },
+    behaviors: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['titolo', 'targetWorkItem'],
+        properties: {
+          titolo: { type: 'string', description: 'short Italian title of the undocumented behavior' },
+          productReq: { type: 'string', description: 'one-line WHAT/WHY in Italian (behavior/rule as a product requirement)' },
+          technicalDetail: { type: 'string', description: 'HOW in Italian: endpoints/paths/identifiers verbatim (do NOT translate code)' },
+          codeRefs: { type: 'string', description: 'code references path:line, verbatim' },
+          targetWorkItem: { type: 'string', description: 'the [Work Item N] heading it best belongs to, or "none"' },
+          why: { type: 'string', description: 'why it is absent from the SRS' },
+        },
+      },
+    },
   },
 }
 
@@ -412,28 +481,92 @@ const P = (VARIANT === 'goals')
 
 // Editor: markdown in, markdown out. The improved SRS is a derivative PROPOSAL
 // the user reviews and imports into a NEW Confluence page (Insert > Markup > Markdown).
-// Variant-agnostic: it restructures the original SRS only, independent of the analysis.
+// Variant-agnostic restructuring, now ENRICHED with the reverse-diff (code->spec)
+// behaviors. Topology: the sonnet converge step is fed by two haiku readers (one per
+// source doc) that run in parallel and converge back into the converge step.
 const editorOut = `${base}/srs-improved.md`
+const reverseDiffPath = `${base}/reverse-diff.md`
 
-const editorPrompt = `${COMMON}
+// Shared editor policy — reused VERBATIM by the SRS-reader (classifier) and the converge step,
+// so both agree on (a) product requirement vs technical spec and (b) the ban on code references.
+// The quoted Italian strings are LITERALS the editor must emit (the output doc is Italian).
+const EDITOR_BUCKETS = `
+PRODUCT vs TECHNICAL split (a PRODUCT judgment, not a syntactic one):
+- "Requisiti di prodotto" = the WHY and the user/business WHAT: user needs, feature goals, what the feature enables for the user/consumer, business rules stated as outcomes, UX expectations, backward-compat as the caller perceives it. A sentence is product-level ONLY if it expresses a user need, a feature goal, or business value.
+- "Specifiche tecniche" = the HOW and everything else implementation/functional: API endpoints & contracts, request/response shapes, validations, config parameters, events, db entities/tables/columns, schemas, protobuf events, merge/migration ordering, implementation notes.
+- TIE-BREAK: when in doubt → "Specifiche tecniche". A purely implementation/functional detail (e.g. a config param with a fallback) is NOT a product requirement.`.trim()
 
-ROLE: EDITOR (SRS-IMPROVED) - ADDED STEP, purely editorial restructuring of the SRS. Does NOT use the analysis output.
-TOOLS: Read, Write, Glob, Grep only. Read ONLY ${srsPath} (no findings/reviews/code, no gh, no network).
+const EDITOR_NO_CODE_REFS = `
+NO CODE REFERENCES in the document (files and line numbers change over time — keep them out):
+- FORBIDDEN: file paths (e.g. packages/.../config.ts), line numbers, :NN-NN ranges, "Riferimento codice:" labels, source file names.
+- ALLOWED: code snippets (\`\`\` blocks), event names (e.g. PurposeTemplateEServiceTemplateLinkedV2), db entities/tables/columns (e.g. eservice_template_version_purpose_template), API endpoints (e.g. POST /purposeTemplates/:id/linkEserviceTemplates).`.trim()
 
-GOAL
-Rewrite the FULL SRS (${srsPath}) into ${editorOut}, ITALIAN markdown, same structure/tone/style, with ONE change: every "[Work Item N]" section is split into two subsections, in order:
-- "### Requisiti di prodotto" — the WHAT/WHY: behavior, business rules, validations, constraints, error semantics, backward-compat as seen by the caller.
-- "### Specifiche tecniche" — the HOW: endpoints, table/column/event/schema identifiers, module names, implementation/merge-ordering/migration notes.
+// Haiku reader #1 — reads the ORIGINAL SRS and emits the per-WI product/technical split.
+const srsReaderPrompt = `${COMMON}
 
-RULES (accuracy first)
-1. REDISTRIBUTE, don't duplicate: each original sentence goes into exactly ONE subsection — nothing left above/outside, nothing repeated, nothing dropped or invented. Roughly same length as the original; if a WI grows a lot you are duplicating — redo it.
-2. Source-faithful: subsections contain ONLY facts written in the SRS (no limits/states/defaults recalled from elsewhere). Mixed sentence → split the sentence, not the meaning. Truly undecidable → put under "Requisiti di prodotto" with "(dettaglio tecnico: ...)".
-3. Verbatim: keep all code identifiers, endpoint paths, SQL and snippets unchanged. Pre-existing sub-headings inside a WI move under the right subsection, demoted one level.
-4. Non-WI sections (Overview, Vincoli, Scenari di test, Change log, ecc.) copied unchanged, except obvious typos ("Inoltree" -> "Inoltre").
-5. No empty subsections: title-only WI → keep its heading + "_(nessun dettaglio nell'SRS)_", no subsections; single-nature WI → emit only the applicable one.
-6. Self-check before returning: re-scan every original WI against your rewrite to confirm rules 1-2 (nothing dropped, duplicated or invented); state in the summary that this check was done.
+ROLE: EDITOR / SRS-READER - haiku reader under the editor. Read ONLY ${srsPath}. TOOLS: Read, Glob, Grep only.
+GOAL: digest the FULL SRS into the structured object below for the converge step. You do NOT write the final document.
 
-WRITE: the Write tool refuses to overwrite a file not Read this session. If ${editorOut} already exists, Read it first, then Write; read it back and confirm it is YOUR content before returning. Output is markdown for a NEW Confluence page (Insert > Markup > Markdown); write ONLY this file. Return the structured object (srsImprovedPath, sectionsSplit, summary).`
+${EDITOR_BUCKETS}
+
+${EDITOR_NO_CODE_REFS}
+
+RULES
+1. For every "[Work Item N]" section, classify each sentence into ONE bucket (product | technical) per the policy above. Mixed sentence → split the sentence, not the meaning. Keep snippets/SQL/identifiers verbatim but DROP file paths and line references.
+2. Record pre-existing sub-headings inside each WI verbatim (subheadings[]).
+3. Non-WI sections (Overview, Vincoli, Scenari di test, Change log, …): copy the body VERBATIM into otherSections[] (heading + body).
+4. Drop nothing, invent nothing, duplicate nothing — every sentence appears exactly once (a stripped code reference is the only allowed removal).
+
+Return the structured object (workItems[], otherSections[]).`
+
+// Haiku reader #2 — reads the reverse-diff and extracts the code->spec behaviors to merge in.
+const revReaderPrompt = `${COMMON}
+
+ROLE: EDITOR / REVERSE-DIFF-READER - haiku reader under the editor. Read ONLY ${reverseDiffPath}. TOOLS: Read, Glob, Grep only.
+GOAL: extract the behaviors that ARE in the code but ABSENT from the SRS, so the converge step can enrich the improved SRS.
+
+RULES
+1. If ${reverseDiffPath} is missing or empty, return { present: false, behaviors: [] } (Glob/Grep to check; do NOT error).
+2. For EACH undocumented behavior emit: titolo; productReq (one-line WHAT/WHY in Italian — fill ONLY if it has a genuine user/business/feature dimension, else ""); technicalDetail (HOW in Italian — keep endpoints/identifiers/snippets/db-entities verbatim, NO file paths or line numbers); codeRefs (path:line, INTERNAL traceability only — never written to the document); why (why it is absent from the SRS).
+3. targetWorkItem: map to the "[Work Item N]" it best belongs to, or "none".
+4. Extract, don't invent. The reverse diff is ITALIAN; keep it Italian.
+
+Return the structured object (present, behaviors[]).`
+
+// Sonnet converge — assembles the improved SRS from the two digests and enriches it.
+const editorConvergePrompt = (srsDigest, revDigest, reverseDiffExpected) => `${COMMON}
+
+ROLE: EDITOR (SRS-IMPROVED) - the CONVERGE step. Two haiku readers digested the source docs; you assemble the final document and ENRICH it with the reverse-diff behaviors.
+TOOLS: Read, Write, Glob, Grep only. You MAY Read ${srsPath} and ${reverseDiffPath} to verify; write ONLY ${editorOut}.
+
+INPUT (from the two haiku readers):
+- SRS digest (per-WI product/technical split + non-WI sections):
+${JSON.stringify(srsDigest, null, 2)}
+- Reverse-diff digest (code->spec behaviors; reverse-diff ${reverseDiffExpected ? 'was produced this run' : 'was NOT produced — expect present:false'}):
+${JSON.stringify(revDigest, null, 2)}
+
+GOAL: write ${editorOut}, ITALIAN markdown, same structure/tone/style as the SRS, restructured AND enriched.
+
+These two policies apply to the WHOLE document (original content AND enrichment):
+${EDITOR_BUCKETS}
+
+${EDITOR_NO_CODE_REFS}
+
+RESTRUCTURE
+1. Split every "[Work Item N]" into two subsections, in order: "### Requisiti di prodotto" then "### Specifiche tecniche", per the policy. The digest's split is a STARTING POINT — re-judge it and MOVE any misclassified sentence (e.g. config/validation/implementation wrongly in product → technical). Pre-existing sub-headings move under the right subsection, demoted one level.
+2. REDISTRIBUTE, don't duplicate: each sentence in exactly ONE subsection — nothing left outside, repeated, dropped or invented. Roughly the original length (plus the marked enrichment).
+3. Keep snippets/SQL/event names/db entities/endpoints verbatim, but STRIP every file path / line number / "Riferimento codice". Non-WI sections copied unchanged, except obvious typos ("Inoltree" -> "Inoltre") and stripped code references.
+4. No empty subsections: title-only WI → heading + "_(nessun dettaglio nell'SRS)_"; single-nature WI → emit only the applicable subsection.
+
+ENRICH with the reverse diff
+5. For each behavior whose targetWorkItem matches a WI: classify it with the same policy, add a product line ONLY if productReq is non-empty and genuinely product-level, put technicalDetail under "### Specifiche tecniche", never write codeRefs. Prefix every added line with "_(da reverse-diff — presente nel codice, assente nell'SRS originale)_ ".
+6. Behaviors with targetWorkItem = "none": collect them in a final section "## Comportamenti rilevati dal codice (reverse diff) non presenti nell'SRS originale", same split + same marker.
+7. If the digest is present:false/empty, add no enrichment — just restructure. Set enrichedFromReverseDiff: 0.
+8. Enrichment is ALWAYS additive and ALWAYS marked — never fold code-derived content silently into the original prose.
+
+SELF-CHECK before returning: confirm nothing original was dropped/duplicated/invented, the classification policy was applied, ZERO file paths or line references remain, and every merged item carries the marker. You MAY Read ${srsPath}/${reverseDiffPath} to verify. State in the summary that the check was done, that the document has no code references, and how many reverse-diff items were merged.
+
+WRITE: the Write tool refuses to overwrite a file not Read this session — if ${editorOut} exists, Read it first, then Write and read it back to confirm. Output is markdown for a NEW Confluence page (Insert > Markup > Markdown); write ONLY this file. Return the structured object (srsImprovedPath, sectionsSplit, enrichedFromReverseDiff, summary).`
 
 const reportPrompt = (results, verdicts, budgetInfo) => `${COMMON}
 
@@ -450,7 +583,7 @@ MANDATORY STRUCTURE (section headings and prose in Italian)
    - Execution evidence: PRs discovered/enriched/discarded (from comments.md), flagged cuts, caps reached, judgment calls${mergeNote ? `, and this section merge: ${mergeNote}` : ''}.
    - FIDELITY NOTE (Workflow orchestration): unlike the Task-based variant, per-subagent tokens are NOT exposed in-band by the workflow. Report the flow TOTAL as read from the session (/cost) and the per-phase breakdown as visible in /workflows; time is read from the driver (date +%s timestamps) or from /workflows. Do not invent numbers: always state the source.
    - TOKEN CAP (added on top of the original spec): ${budgetInfo} — report this verbatim in the cost evidence, and if anything was skipped for budget, list it explicitly (no silent truncation).
-   - ADDED STEP (editor, on top of the original spec): ${editorOut} (each Work Item restructured into "Requisiti di prodotto" vs "Specifiche tecniche") is generated in PARALLEL with this report — list it among the deliverables in RR-5 noting it may still be in progress at report time; do NOT block on it.
+   - ADDED STEP (editor, on top of the original spec): ${editorOut} (each Work Item restructured into "Requisiti di prodotto" vs "Specifiche tecniche", AND enriched with the reverse-diff code->spec behaviors, each marked with a provenance tag) is generated in PARALLEL with this report by a sonnet converge step fed by two haiku readers — list it among the deliverables in RR-5 noting it may still be in progress at report time; do NOT block on it.
 
 ANALYSIS RESULTS (structured summary, validate against the files):
 ${JSON.stringify(results, null, 2)}
@@ -536,24 +669,44 @@ log(`analysis + verification done: ${okResults.length}/${units.length} units`)
 
 // RF-FLOW-6 — Reverse diff (after verification: uses the definitive findings; implicit barrier from awaiting the pipeline)
 phase('Reverse diff')
+let reverseDiffDone = false
 if (analysisBudgetExhausted()) {
   budgetSkipped.push('reverse-scout')
   flagBudget('reverse-scout (reverse diff)')
 } else {
-  await agent(P.reverseScout, { label: 'reverse-scout', phase: 'Reverse diff', model: MODELS.reverseScout })
+  const rev = await agent(P.reverseScout, { label: 'reverse-scout', phase: 'Reverse diff', model: MODELS.reverseScout })
+  // The editor enrichment depends on reverse-diff.md existing; the reader degrades gracefully if not.
+  reverseDiffDone = Boolean(rev)
 }
 
 // RF-FLOW-7 — Report (always attempted within REPORT_RESERVE; documents the cap status in RR-5)
 // + ADDED STEP — editor (srs-improved.md): independent of the report, so the two run in parallel.
+//   The editor is itself a sub-pipeline: two haiku readers (SRS digest ∥ reverse-diff
+//   extract) converge into the sonnet editor, which assembles + enriches the improved SRS.
 //   Budget gate decided BEFORE building budgetInfo, so a skipped editor shows up in RR-5.
 phase('Report')
 const skipEditor = analysisBudgetExhausted()
-if (skipEditor) { budgetSkipped.push('editor'); flagBudget('editor (srs-improved.md)') }
+if (skipEditor) { budgetSkipped.push('editor'); flagBudget('editor (srs-improved.md, with reverse-diff enrichment)') }
 const budgetInfo = `TOKEN CAP for this run: ${TOKEN_CAP} output tokens (best-effort, enforced at agent-spawn checkpoints; runtime hard-throw only with a user "+Nk" directive). In-workflow spend (budget.spent() delta) at report time: ~${spentHere()}. Cap hit: ${budgetHit ? 'YES' : 'no'}.${budgetSkipped.length ? ` Skipped for budget (NOT silently truncated): ${budgetSkipped.join(', ')}.` : ''} PER-ROLE MODEL MIX: ${modelMix}. CAVEAT: a mixed-model run is NOT cost-comparable 1:1 with a uniform-Opus run — state this when comparing RR-5 against the goals variant.`
+
+// Editor sub-pipeline: two haiku readers run in parallel, then the sonnet editor converges.
+const runEditor = async () => {
+  if (skipEditor) return null
+  const [srsDigest, revDigest] = await parallel([
+    () => agent(srsReaderPrompt, { label: 'editor:srs-reader', phase: 'SRS improved', schema: SRS_DIGEST_SCHEMA, model: MODELS.editorReader }),
+    () => agent(revReaderPrompt, { label: 'editor:revdiff-reader', phase: 'SRS improved', schema: REVDIFF_DIGEST_SCHEMA, model: MODELS.editorReader }),
+  ])
+  // The SRS digest is the backbone — without it the converge step has nothing faithful to assemble.
+  if (!srsDigest) { log('WARNING: editor SRS-reader failed — skipping srs-improved.md (no faithful digest to assemble).'); return null }
+  // The reverse-diff reader is best-effort: a null/absent digest just means no enrichment.
+  const rev = revDigest || { present: false, behaviors: [] }
+  return agent(editorConvergePrompt(srsDigest, rev, reverseDiffDone), {
+    label: 'editor:converge', phase: 'SRS improved', schema: EDITOR_SCHEMA, model: MODELS.editor,
+  })
+}
+
 const [improved, report] = await parallel([
-  () => skipEditor
-    ? Promise.resolve(null)
-    : agent(editorPrompt, { label: 'editor', phase: 'SRS improved', schema: EDITOR_SCHEMA, model: MODELS.editor }),
+  runEditor,
   () => agent(reportPrompt(okResults, verdicts, budgetInfo), { label: 'report', phase: 'Report', schema: REPORT_SCHEMA, model: MODELS.report }),
 ])
 if (!report) log(`WARNING: report agent failed — ${base}/report.md may be missing; findings/reviews/reverse-diff are still on disk.`)
@@ -568,6 +721,7 @@ return {
   summary: report?.summary,
   srsImprovedPath: improved?.srsImprovedPath,
   srsImprovedSummary: improved?.summary,
+  srsImprovedEnriched: improved?.enrichedFromReverseDiff,
   units: units.length,
   analyzed: okResults.length,
   tokenCap: TOKEN_CAP,
