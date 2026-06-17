@@ -15,10 +15,10 @@ Il cuore è un **Workflow Claude Code** (`workflows/spec-analyze.js`) che orches
 
 | Fase | Ruolo | Cosa fa | Modello |
 |------|-------|---------|---------|
-| **Context** | `cartografo` ∥ `crawler` | mappa del repo (aree/moduli) e raccolta PR + commenti rilevanti, in parallelo | haiku |
-| **Analysis** | `analizzatore` (fan-out, 1 per sezione SRS) | per ogni sezione stabilisce lo stato di copertura e i riferimenti al codice (`path:line`) | opus |
+| **Context** | `cartographer` ∥ `crawler` | mappa del repo (aree/moduli) e raccolta PR + commenti rilevanti, in parallelo | haiku |
+| **Analysis** | `analyzer` (fan-out, 1 per sezione SRS) | per ogni sezione stabilisce lo stato di copertura e i riferimenti al codice (`path:line`) | opus |
 | **Verification** | `verifier` + `rework` | revisione **adversariale** di ogni finding (falsifica, non conferma) + un singolo round di rework se serve | opus |
-| **Reverse diff** | `ricognitore-inverso` | parte dal codice e trova comportamenti non documentati nell'SRS | sonnet |
+| **Reverse diff** | `reverse-scout` | parte dal codice e trova comportamenti non documentati nell'SRS | sonnet |
 | **Report** | `report` | sintesi finale `report.md` (in italiano) con tabella di copertura, gap, RR-4 (verificato/contestato) e RR-5 (evidenze di esecuzione e costi) | sonnet |
 
 Principi chiave:

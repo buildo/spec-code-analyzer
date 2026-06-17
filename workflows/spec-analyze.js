@@ -3,11 +3,11 @@ export const meta = {
   description: 'Spec-vs-code as a dynamic workflow, A/B-parameterized by args.variant ("prescriptive" default | "goals"): context in parallel, fan-out of N analyzers from the SRS sections, adversarial verification + bounded rework in a pipeline, reverse diff, report. The orchestration skeleton is IDENTICAL across variants — only the two experimental axes differ (axis a = spec style: step-by-step PROCEDURE vs Objective/Contract/Guardrail; axis b = discovery freedom: fixed numeric caps vs budget+judgment).',
   whenToUse: 'After the interactive preflight (credentials + gh check, fetch_atlassian.py, RF-FLOW-2 confirmation and SRS segmentation into <=10 units). Inputs are passed via args (set args.variant to pick the A/B arm). It does NOT run the fetch nor the user confirmation itself. For an A/B comparison, run both variants on the SAME repo/branch/units, into SEPARATE output dirs.',
   phases: [
-    { title: 'Context', detail: 'cartografo || crawler (parallel, independent)', model: 'haiku' },
+    { title: 'Context', detail: 'cartographer || crawler (parallel, independent)', model: 'haiku' },
     { title: 'Analysis', detail: 'fan-out: one analyzer per SRS unit', model: 'opus' },
     { title: 'Verification', detail: 'verifier (opus) per finding + bounded rework (opus, <=1 round)', model: 'opus' },
-    { title: 'Reverse diff', detail: 'ricognitore-inverso over the definitive findings', model: 'sonnet' },
-    { title: 'SRS improved', detail: 'redattore: each Work Item restructured into product requirements vs technical specs (srs-improved.md, importable into a new Confluence page)', model: 'sonnet' },
+    { title: 'Reverse diff', detail: 'reverse-scout over the definitive findings', model: 'sonnet' },
+    { title: 'SRS improved', detail: 'editor: each Work Item restructured into product requirements vs technical specs (srs-improved.md, importable into a new Confluence page)', model: 'sonnet' },
     { title: 'Report', detail: 'final synthesis report.md with RR-4 and RR-5', model: 'sonnet' },
   ],
 }
@@ -27,12 +27,11 @@ export const meta = {
 //     mergeNote:  "free-text note about section merges performed" | null
 //   }
 // All artifacts live under the session launch cwd (never /tmp).
-// Role names in labels/headers (cartografo, crawler, analizzatore, verifier,
-// ricognitore-inverso) are kept verbatim for traceability to the plugin's
-// agents/*.md and the requirements doc; only the working language is English.
-// The redattore (srs-improved.md) is an ADDED role with no agents/*.md counterpart,
-// variant-agnostic and independent of the analysis (reads only the original SRS).
-// The final report.md is written in ITALIAN on purpose (see reportPrompt).
+// The role names (cartographer, crawler, analyzer, verifier, reverse-scout) are the
+// English working names of the plugin's agents/*.md roles (originally Italian); only
+// the working language is English. The editor (srs-improved.md) is an ADDED role with
+// no agents/*.md counterpart, variant-agnostic and independent of the analysis (reads
+// only the original SRS). The final report.md is written in ITALIAN on purpose (see reportPrompt).
 // ---------------------------------------------------------------------------
 
 // Normalize args: the Workflow runtime sometimes delivers the `args` input as a
@@ -70,7 +69,7 @@ if (badUnits.length > 0) {
   throw new Error(`Malformed args.units: every unit needs a non-empty 'idx' and 'titolo'. Offending units: ${badUnits.map(({ u, i }) => u?.idx ?? `#${i}`).join(', ')}.`)
 }
 
-// Defend against duplicate idx: they collide on labels (analizzatore:<idx>), on
+// Defend against duplicate idx: they collide on labels (analyzer:<idx>), on
 // reviews/<idx>-… naming, and on the report overview/verdicts rows.
 const dupIdx = units.map((u) => u.idx).filter((id, i, all) => all.indexOf(id) !== i)
 if (dupIdx.length > 0) {
@@ -98,7 +97,7 @@ const REPORT_RESERVE = 40_000 // headroom kept for the final report agent
 // ---------------------------------------------------------------------------
 // Per-role model strategy (tweak one line to re-balance cost/quality).
 // Values: 'opus' (max correctness) | 'sonnet' (balanced) | 'haiku' (cheap/fast).
-// Rationale: the 3 correctness-critical roles (analizzatore, verifier, rework)
+// Rationale: the 3 correctness-critical roles (analyzer, verifier, rework)
 // stay on Opus; the 2 mechanical discovery roles go Haiku (also much faster);
 // the 2 secondary/synthesis roles go Sonnet. Cost lever: drop verifier→'sonnet'
 // for a bigger saving at the cost of adversarial catch-rate on subtle cases.
@@ -106,13 +105,13 @@ const REPORT_RESERVE = 40_000 // headroom kept for the final report agent
 // run — this is surfaced in RR-5.
 // ---------------------------------------------------------------------------
 const MODELS = {
-  cartografo: 'haiku',
+  cartographer: 'haiku',
   crawler: 'haiku',
-  analizzatore: 'opus',
+  analyzer: 'opus',
   verifier: 'opus',
   rework: 'opus',
-  ricognitore: 'sonnet',
-  redattore: 'sonnet',
+  reverseScout: 'sonnet',
+  editor: 'sonnet',
   report: 'sonnet',
 }
 const modelMix = Object.entries(MODELS).map(([k, v]) => `${k}=${v}`).join(', ')
@@ -128,12 +127,12 @@ const AXES = (VARIANT === 'goals')
   ? {
       style: 'GOALS',
       styleDesc: 'roles/playbook expressed as Objective / Input / Output-contract / Guardrail-invariants — outcomes constrained, not the steps ("vincola gli esiti, non i percorsi")',
-      discovery: 'BUDGET + JUDGMENT — no fixed numeric ceilings on discovery; the agent decides how many PRs to enrich within a reasonable cost budget, flagging every cut (never a silent truncation). The role boundary (crawler = global bulk harvester; analizzatore = targeted gap-fill) and the cost guardrails fan-out<=10 / rework<=1 are kept',
+      discovery: 'BUDGET + JUDGMENT — no fixed numeric ceilings on discovery; the agent decides how many PRs to enrich within a reasonable cost budget, flagging every cut (never a silent truncation). The role boundary (crawler = global bulk harvester; analyzer = targeted gap-fill) and the cost guardrails fan-out<=10 / rework<=1 are kept',
     }
   : {
       style: 'PRESCRIPTIVE',
       styleDesc: 'roles/playbook as step-by-step numbered PROCEDUREs',
-      discovery: 'FIXED NUMERIC CAPS — ~30 enriched PRs (crawler) and <=3 new PRs per section (analizzatore gap-fill), plus the S1-S4 signal taxonomy',
+      discovery: 'FIXED NUMERIC CAPS — ~30 enriched PRs (crawler) and <=3 new PRs per section (analyzer gap-fill), plus the S1-S4 signal taxonomy',
     }
 const startSpent = budget?.spent?.() ?? 0
 const spentHere = () => (budget?.spent?.() ?? startSpent) - startSpent
@@ -197,7 +196,7 @@ const VERIFIER_SCHEMA = {
   },
 }
 
-const REDATTORE_SCHEMA = {
+const EDITOR_SCHEMA = {
   type: 'object',
   additionalProperties: true,
   required: ['srsImprovedPath'],
@@ -221,9 +220,9 @@ const REPORT_SCHEMA = {
 // ---------------------------------------------------------------------------
 // Role prompts (inlined, faithful to the prescriptive variant's agents/*.md)
 // ---------------------------------------------------------------------------
-const cartografoPrompt = `${COMMON}
+const cartographerPrompt = `${COMMON}
 
-ROLE: CARTOGRAFO (RF-7) - repository map, run ONCE.
+ROLE: CARTOGRAPHER (RF-7) - repository map, run ONCE.
 TOOLS: Bash, Read, Write only.
 Build the as-is orientation of the repo for all the other roles. Do NOT read file contents: produce orientation only.
 
@@ -238,7 +237,7 @@ Return a short text summary (number of areas, index path).`
 
 const crawlerPrompt = `${COMMON}
 
-ROLE: CRAWLER (RF-8, §10.1) - PR & comment discovery, stage A, run ONCE, in PARALLEL with the cartografo (you do NOT depend on repo-map/). You are the ONLY bulk harvester of comments.
+ROLE: CRAWLER (RF-8, §10.1) - PR & comment discovery, stage A, run ONCE, in PARALLEL with the cartographer (you do NOT depend on repo-map/). You are the ONLY bulk harvester of comments.
 TOOLS: Bash, Read, Write only.
 
 PROCEDURE
@@ -255,9 +254,9 @@ OUTPUT: ${base}/comments.md. At the HEAD the PR->path index: | PR | Title | Stat
 Discovery does NOT stop at Jira links; open PRs = context; no secrets.
 Return a short summary (candidate PRs, enriched, discarded, any cut).`
 
-const analizzatorePrompt = (u) => `${COMMON}
+const analyzerPrompt = (u) => `${COMMON}
 
-ROLE: ANALIZZATORE (RF-9, §10.2) - spec->code coverage for ONE section, in fan-out. You are NOT a bulk harvester: broad discovery belongs to the crawler; you only do targeted gap-fill on your own paths.
+ROLE: ANALYZER (RF-9, §10.2) - spec->code coverage for ONE section, in fan-out. You are NOT a bulk harvester: broad discovery belongs to the crawler; you only do targeted gap-fill on your own paths.
 TOOLS: Bash, Read, Grep, Write only.
 
 ASSIGNED SECTION
@@ -290,7 +289,7 @@ INPUT
 PROCEDURE
 1. Re-read the section's requirement prose and the finding.
 2. Verify that EVERY cited code reference ACTUALLY exists on branch ${branch} (file and line) and that it SUPPORTS the declared status. Flag non-existent or irrelevant references (also check for off-by-one on the lines).
-3. Independently RE-LOCATE the section's as-is code looking for coverage or gaps NOT seen by the analizzatore.
+3. Independently RE-LOCATE the section's as-is code looking for coverage or gaps NOT seen by the analyzer.
 4. Check correct use of the status/gap enums and respect for as-is truth.
 5. Emit the verdict.
 
@@ -300,7 +299,7 @@ Return the structured object (idx, verdetto, reviewPath, contestazioni).`
 
 const reworkPrompt = (idx, titolo, findingPath, objections) => `${COMMON}
 
-ROLE: ANALIZZATORE - REWORK (RF-FLOW-5), a single round.
+ROLE: ANALYZER - REWORK (RF-FLOW-5), a single round.
 TOOLS: Bash, Read, Grep, Write only.
 The verifier issued a 'revise' verdict on the finding ${findingPath} (section ${idx} - ${titolo}).
 Address the objections below and REWRITE ${findingPath} as the DEFINITIVE version (single round: if something stays unresolvable, note it in the finding as a "residual objection").
@@ -311,9 +310,9 @@ ${objections}
 Keep the finding contract (status enum, path:line references verified on ${branch}, gap enum, doubts, any code-side PRs). As-is truth; no secrets.
 Return the updated structured object (idx, titolo, stato, gap, findingPath, note).`
 
-const ricognitorePrompt = `${COMMON}
+const reverseScoutPrompt = `${COMMON}
 
-ROLE: RICOGNITORE-INVERSO (RF-10) - reverse diff code->spec, run AFTER verification. Mirror of the analizzatore: start from the CODE and look for what is NOT documented in the SRS.
+ROLE: REVERSE-SCOUT (RF-10) - reverse diff code->spec, run AFTER verification. Mirror of the analyzer: start from the CODE and look for what is NOT documented in the SRS.
 TOOLS: Bash, Read, Glob, Grep, Write only.
 
 PROCEDURE
@@ -334,9 +333,9 @@ Return a short summary (number of entries).`
 // numbered PROCEDURE to Objective / Output-contract / Guardrail-invariants, and
 // the discovery caps become "budget + judgment". This is exactly axis (a)+(b).
 // ---------------------------------------------------------------------------
-const cartografoPromptGoals = `${COMMON}
+const cartographerPromptGoals = `${COMMON}
 
-ROLE: CARTOGRAFO (RF-7) - repository map, run ONCE. GOALS STYLE (constrain the outcome, not the steps).
+ROLE: CARTOGRAPHER (RF-7) - repository map, run ONCE. GOALS STYLE (constrain the outcome, not the steps).
 TOOLS: Bash, Read, Write only.
 
 OBJECTIVE: produce enough as-is orientation of the repo that the other roles can locate code without re-reading everything. Orientation only - do NOT read file contents.
@@ -346,7 +345,7 @@ Return a short text summary (number of areas, index path).`
 
 const crawlerPromptGoals = `${COMMON}
 
-ROLE: CRAWLER (RF-8, §10.1) - PR & comment discovery, run ONCE, in PARALLEL with the cartografo (you do NOT depend on repo-map/). GOALS STYLE. You are the ONLY bulk harvester of comments.
+ROLE: CRAWLER (RF-8, §10.1) - PR & comment discovery, run ONCE, in PARALLEL with the cartographer (you do NOT depend on repo-map/). GOALS STYLE. You are the ONLY bulk harvester of comments.
 TOOLS: Bash, Read, Write only.
 
 OBJECTIVE: a pre-localization overview of the PRs and comments relevant to this feature/domain.
@@ -354,9 +353,9 @@ OUTPUT CONTRACT: ${base}/comments.md with, at the HEAD, an index that makes the 
 GUARDRAILS/INVARIANTS: discovery does NOT stop at Jira links - draw on AT LEAST Jira remote links, issue keys, feature terms from ${srsPath}, OPEN PRs against ${branch}, AND any other useful signal, by judgment (the concrete queries/commands are YOURS to choose); dedupe (same author+text) and filter noise (bots, LGTM, CI); OPEN PRs = context, NOT coverage. COST BUDGET, NO FIXED NUMERIC CEILING: keep the number of enriched PRs reasonable, prioritize by relevance, and FLAG every cut - never a silent truncation. Judgment decides how many PRs deserve enrichment. No secrets.
 Return a short summary (candidate PRs, enriched, discarded, any flagged cut).`
 
-const analizzatorePromptGoals = (u) => `${COMMON}
+const analyzerPromptGoals = (u) => `${COMMON}
 
-ROLE: ANALIZZATORE (RF-9, §10.2) - spec->code coverage for ONE section, in fan-out. GOALS STYLE. You are NOT a bulk harvester: broad discovery belongs to the crawler.
+ROLE: ANALYZER (RF-9, §10.2) - spec->code coverage for ONE section, in fan-out. GOALS STYLE. You are NOT a bulk harvester: broad discovery belongs to the crawler.
 TOOLS: Bash, Read, Grep, Write only.
 
 ASSIGNED SECTION
@@ -386,7 +385,7 @@ Return the structured object (idx, verdetto, reviewPath, contestazioni).`
 
 const reworkPromptGoals = (idx, titolo, findingPath, objections) => `${COMMON}
 
-ROLE: ANALIZZATORE - REWORK (RF-FLOW-5), a single round. GOALS STYLE.
+ROLE: ANALYZER - REWORK (RF-FLOW-5), a single round. GOALS STYLE.
 TOOLS: Bash, Read, Grep, Write only.
 The verifier issued a 'revise' verdict on the finding ${findingPath} (section ${idx} - ${titolo}).
 
@@ -396,9 +395,9 @@ ${objections}
 OUTPUT CONTRACT / GUARDRAILS: keep the finding contract (status enum, path:line references verified on ${branch}, gap enum, doubts, any code-side PRs); as-is truth; no secrets.
 Return the updated structured object (idx, titolo, stato, gap, findingPath, note).`
 
-const ricognitorePromptGoals = `${COMMON}
+const reverseScoutPromptGoals = `${COMMON}
 
-ROLE: RICOGNITORE-INVERSO (RF-10) - reverse diff code->spec, run AFTER verification. GOALS STYLE. Mirror of the analizzatore: start from the CODE and find what is NOT documented in the SRS.
+ROLE: REVERSE-SCOUT (RF-10) - reverse diff code->spec, run AFTER verification. GOALS STYLE. Mirror of the analyzer: start from the CODE and find what is NOT documented in the SRS.
 TOOLS: Bash, Read, Glob, Grep, Write only.
 
 OBJECTIVE: identify behaviors in the code (endpoints, rules, edge cases) that are undocumented in the SRS.
@@ -408,21 +407,21 @@ Return a short summary (number of entries).`
 
 // Variant selector: the orchestration below references P.* only — the skeleton is identical.
 const P = (VARIANT === 'goals')
-  ? { cartografo: cartografoPromptGoals, crawler: crawlerPromptGoals, analizzatore: analizzatorePromptGoals, verifier: verifierPromptGoals, rework: reworkPromptGoals, ricognitore: ricognitorePromptGoals }
-  : { cartografo: cartografoPrompt, crawler: crawlerPrompt, analizzatore: analizzatorePrompt, verifier: verifierPrompt, rework: reworkPrompt, ricognitore: ricognitorePrompt }
+  ? { cartographer: cartographerPromptGoals, crawler: crawlerPromptGoals, analyzer: analyzerPromptGoals, verifier: verifierPromptGoals, rework: reworkPromptGoals, reverseScout: reverseScoutPromptGoals }
+  : { cartographer: cartographerPrompt, crawler: crawlerPrompt, analyzer: analyzerPrompt, verifier: verifierPrompt, rework: reworkPrompt, reverseScout: reverseScoutPrompt }
 
-// Redattore: markdown in, markdown out. The improved SRS is a derivative PROPOSAL
+// Editor: markdown in, markdown out. The improved SRS is a derivative PROPOSAL
 // the user reviews and imports into a NEW Confluence page (Insert > Markup > Markdown).
 // Variant-agnostic: it restructures the original SRS only, independent of the analysis.
-const redattoreOut = `${base}/srs-improved.md`
+const editorOut = `${base}/srs-improved.md`
 
-const redattorePrompt = `${COMMON}
+const editorPrompt = `${COMMON}
 
-ROLE: REDATTORE (SRS-IMPROVED) - ADDED STEP, purely editorial restructuring of the SRS. Does NOT use the analysis output.
+ROLE: EDITOR (SRS-IMPROVED) - ADDED STEP, purely editorial restructuring of the SRS. Does NOT use the analysis output.
 TOOLS: Read, Write, Glob, Grep only. Read ONLY ${srsPath} (no findings/reviews/code, no gh, no network).
 
 GOAL
-Rewrite the FULL SRS (${srsPath}) into ${redattoreOut}, ITALIAN markdown, same structure/tone/style, with ONE change: every "[Work Item N]" section is split into two subsections, in order:
+Rewrite the FULL SRS (${srsPath}) into ${editorOut}, ITALIAN markdown, same structure/tone/style, with ONE change: every "[Work Item N]" section is split into two subsections, in order:
 - "### Requisiti di prodotto" — the WHAT/WHY: behavior, business rules, validations, constraints, error semantics, backward-compat as seen by the caller.
 - "### Specifiche tecniche" — the HOW: endpoints, table/column/event/schema identifiers, module names, implementation/merge-ordering/migration notes.
 
@@ -434,7 +433,7 @@ RULES (accuracy first)
 5. No empty subsections: title-only WI → keep its heading + "_(nessun dettaglio nell'SRS)_", no subsections; single-nature WI → emit only the applicable one.
 6. Self-check before returning: re-scan every original WI against your rewrite to confirm rules 1-2 (nothing dropped, duplicated or invented); state in the summary that this check was done.
 
-WRITE: the Write tool refuses to overwrite a file not Read this session. If ${redattoreOut} already exists, Read it first, then Write; read it back and confirm it is YOUR content before returning. Output is markdown for a NEW Confluence page (Insert > Markup > Markdown); write ONLY this file. Return the structured object (srsImprovedPath, sectionsSplit, summary).`
+WRITE: the Write tool refuses to overwrite a file not Read this session. If ${editorOut} already exists, Read it first, then Write; read it back and confirm it is YOUR content before returning. Output is markdown for a NEW Confluence page (Insert > Markup > Markdown); write ONLY this file. Return the structured object (srsImprovedPath, sectionsSplit, summary).`
 
 const reportPrompt = (results, verdicts, budgetInfo) => `${COMMON}
 
@@ -451,7 +450,7 @@ MANDATORY STRUCTURE (section headings and prose in Italian)
    - Execution evidence: PRs discovered/enriched/discarded (from comments.md), flagged cuts, caps reached, judgment calls${mergeNote ? `, and this section merge: ${mergeNote}` : ''}.
    - FIDELITY NOTE (Workflow orchestration): unlike the Task-based variant, per-subagent tokens are NOT exposed in-band by the workflow. Report the flow TOTAL as read from the session (/cost) and the per-phase breakdown as visible in /workflows; time is read from the driver (date +%s timestamps) or from /workflows. Do not invent numbers: always state the source.
    - TOKEN CAP (added on top of the original spec): ${budgetInfo} — report this verbatim in the cost evidence, and if anything was skipped for budget, list it explicitly (no silent truncation).
-   - ADDED STEP (redattore, on top of the original spec): ${redattoreOut} (each Work Item restructured into "Requisiti di prodotto" vs "Specifiche tecniche") is generated in PARALLEL with this report — list it among the deliverables in RR-5 noting it may still be in progress at report time; do NOT block on it.
+   - ADDED STEP (editor, on top of the original spec): ${editorOut} (each Work Item restructured into "Requisiti di prodotto" vs "Specifiche tecniche") is generated in PARALLEL with this report — list it among the deliverables in RR-5 noting it may still be in progress at report time; do NOT block on it.
 
 ANALYSIS RESULTS (structured summary, validate against the files):
 ${JSON.stringify(results, null, 2)}
@@ -469,25 +468,25 @@ log(`spec-analyze (${VARIANT}) · style=${AXES.style} · ${repo}@${branch} · ${
 // RF-FLOW-3 — Context in parallel (barrier: analyzers depend on repo-map/ and comments.md)
 phase('Context')
 const [mapResult, crawlResult] = await parallel([
-  () => agent(P.cartografo, { label: 'cartografo', phase: 'Context', model: MODELS.cartografo }),
+  () => agent(P.cartographer, { label: 'cartographer', phase: 'Context', model: MODELS.cartographer }),
   () => agent(P.crawler, { label: 'crawler', phase: 'Context', model: MODELS.crawler }),
 ])
 if (!mapResult || !crawlResult) {
-  const failed = [!mapResult && 'cartografo (repo-map/)', !crawlResult && 'crawler (comments.md)'].filter(Boolean).join(' and ')
+  const failed = [!mapResult && 'cartographer (repo-map/)', !crawlResult && 'crawler (comments.md)'].filter(Boolean).join(' and ')
   throw new Error(`Context phase aborted: ${failed} failed — downstream analysis depends on it and cannot proceed reliably.`)
 }
 
 // RF-FLOW-4/5 — Fan-out analyzers -> verifier -> bounded rework, in a pipeline (no barrier between units)
 const results = await pipeline(
   units,
-  // stage 1: ANALIZZATORE (skipped-with-flag if the token cap is exhausted)
+  // stage 1: ANALYZER (skipped-with-flag if the token cap is exhausted)
   (u) => {
-    if (analysisBudgetExhausted()) { budgetSkipped.push(`analizzatore:${u.idx}`); flagBudget(`analizzatore:${u.idx}`); return null }
-    return agent(P.analizzatore(u), {
-      label: `analizzatore:${u.idx}`,
+    if (analysisBudgetExhausted()) { budgetSkipped.push(`analyzer:${u.idx}`); flagBudget(`analyzer:${u.idx}`); return null }
+    return agent(P.analyzer(u), {
+      label: `analyzer:${u.idx}`,
       phase: 'Analysis',
       schema: ANALYSIS_SCHEMA,
-      model: MODELS.analizzatore,
+      model: MODELS.analyzer,
     })
   },
   // stage 2: VERIFIER + bounded REWORK (<=1 round), per single unit
@@ -538,27 +537,27 @@ log(`analysis + verification done: ${okResults.length}/${units.length} units`)
 // RF-FLOW-6 — Reverse diff (after verification: uses the definitive findings; implicit barrier from awaiting the pipeline)
 phase('Reverse diff')
 if (analysisBudgetExhausted()) {
-  budgetSkipped.push('ricognitore-inverso')
-  flagBudget('ricognitore-inverso (reverse diff)')
+  budgetSkipped.push('reverse-scout')
+  flagBudget('reverse-scout (reverse diff)')
 } else {
-  await agent(P.ricognitore, { label: 'ricognitore-inverso', phase: 'Reverse diff', model: MODELS.ricognitore })
+  await agent(P.reverseScout, { label: 'reverse-scout', phase: 'Reverse diff', model: MODELS.reverseScout })
 }
 
 // RF-FLOW-7 — Report (always attempted within REPORT_RESERVE; documents the cap status in RR-5)
-// + ADDED STEP — redattore (srs-improved.md): independent of the report, so the two run in parallel.
-//   Budget gate decided BEFORE building budgetInfo, so a skipped redattore shows up in RR-5.
+// + ADDED STEP — editor (srs-improved.md): independent of the report, so the two run in parallel.
+//   Budget gate decided BEFORE building budgetInfo, so a skipped editor shows up in RR-5.
 phase('Report')
-const skipRedattore = analysisBudgetExhausted()
-if (skipRedattore) { budgetSkipped.push('redattore'); flagBudget('redattore (srs-improved.md)') }
+const skipEditor = analysisBudgetExhausted()
+if (skipEditor) { budgetSkipped.push('editor'); flagBudget('editor (srs-improved.md)') }
 const budgetInfo = `TOKEN CAP for this run: ${TOKEN_CAP} output tokens (best-effort, enforced at agent-spawn checkpoints; runtime hard-throw only with a user "+Nk" directive). In-workflow spend (budget.spent() delta) at report time: ~${spentHere()}. Cap hit: ${budgetHit ? 'YES' : 'no'}.${budgetSkipped.length ? ` Skipped for budget (NOT silently truncated): ${budgetSkipped.join(', ')}.` : ''} PER-ROLE MODEL MIX: ${modelMix}. CAVEAT: a mixed-model run is NOT cost-comparable 1:1 with a uniform-Opus run — state this when comparing RR-5 against the goals variant.`
 const [improved, report] = await parallel([
-  () => skipRedattore
+  () => skipEditor
     ? Promise.resolve(null)
-    : agent(redattorePrompt, { label: 'redattore', phase: 'SRS improved', schema: REDATTORE_SCHEMA, model: MODELS.redattore }),
+    : agent(editorPrompt, { label: 'editor', phase: 'SRS improved', schema: EDITOR_SCHEMA, model: MODELS.editor }),
   () => agent(reportPrompt(okResults, verdicts, budgetInfo), { label: 'report', phase: 'Report', schema: REPORT_SCHEMA, model: MODELS.report }),
 ])
 if (!report) log(`WARNING: report agent failed — ${base}/report.md may be missing; findings/reviews/reverse-diff are still on disk.`)
-if (!improved && !skipRedattore) log(`WARNING: redattore agent failed — ${base}/srs-improved.md may be missing; the rest of the deliverables are unaffected.`)
+if (!improved && !skipEditor) log(`WARNING: editor agent failed — ${base}/srs-improved.md may be missing; the rest of the deliverables are unaffected.`)
 
 return {
   variant: VARIANT,
