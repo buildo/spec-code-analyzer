@@ -19,6 +19,7 @@ Il cuore è un **Workflow Claude Code** (`workflows/spec-analyze.js`) che orches
 | **Analysis** | `analyzer` (fan-out, 1 per sezione SRS) | per ogni sezione stabilisce lo stato di copertura e i riferimenti al codice (`path:line`) | opus |
 | **Verification** | `verifier` + `rework` | revisione **adversariale** di ogni finding (falsifica, non conferma) + un singolo round di rework se serve | opus |
 | **Reverse diff** | `reverse-scout` | parte dal codice e trova comportamenti non documentati nell'SRS | sonnet |
+| **SRS improved** | `editor` (2 reader haiku → converge → verify adversariale → rework) | riscrive l'SRS in `srs-improved.md`: ogni Work Item separato in **Requisiti di prodotto** vs **Specifiche tecniche** e arricchito con i comportamenti code→spec del reverse-diff; in parallelo col report | sonnet (reader haiku) |
 | **Report** | `report` | sintesi finale `report.md` (in italiano) con tabella di copertura, gap, RR-4 (verificato/contestato) e RR-5 (evidenze di esecuzione e costi) | sonnet |
 
 Principi chiave:
@@ -82,7 +83,7 @@ python3 workflows/fetch_atlassian.py \
 }
 ```
 
-Output sotto `<outputDir>/<slug>/`: `repo-map/`, `comments.md`, `findings/`, `reviews/`, `reverse-diff.md` e il `report.md` finale.
+Output sotto `<outputDir>/<slug>/`: `repo-map/`, `comments.md`, `findings/`, `reviews/`, `reverse-diff.md`, l'`srs-improved.md` (SRS riscritto prodotto/tecnico + arricchito) e il `report.md` finale.
 
 **5. Breakdown costi** (opzionale, dopo la run):
 
