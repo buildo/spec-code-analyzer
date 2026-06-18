@@ -90,11 +90,20 @@ if (units.length > 10) {
 // budget.spent() is the WHOLE-TURN shared output-token pool, so we measure the DELTA
 // from workflow start. This is a BEST-EFFORT ceiling enforced at agent-spawn
 // checkpoints (skip-with-flag, never silent): the runtime's hard auto-throw only
-// kicks in when the USER sets a "+Nk" directive (budget.total). We keep a reserve so
-// a (partial) report can always be written. Skips are recorded for RR-5.
+// kicks in when the USER sets a "+Nk" directive (budget.total). Skips are recorded for RR-5.
+//
+// The TAIL_RESERVE is the headroom the analysis pipeline must leave for everything that
+// runs AFTER it — the editor sub-pipeline (which runs IN PARALLEL with the report) and
+// the report itself. The editor portion scales per Work Item (it restructures + enriches
+// one product/technical split per WI, then verifies + reworks the whole doc), so it is
+// derived from units.length rather than a flat number; the report portion is ~fixed.
+// TOKEN_CAP is an arg (default 500k) so the ceiling is parametrizable per run.
 // ---------------------------------------------------------------------------
-const TOKEN_CAP = 500_000
-const REPORT_RESERVE = 40_000 // headroom kept for the final report agent
+const TOKEN_CAP = Number(A.tokenCap) > 0 ? Number(A.tokenCap) : 500_000
+const REPORT_RESERVE = 40_000        // headroom kept for the final report agent
+const EDITOR_TOKENS_PER_WI = 8_000   // ~converge + verify + rework output per WI (haiku readers are cheap); rough, from validation runs
+const EDITOR_RESERVE = Math.min(Math.max(units.length * EDITOR_TOKENS_PER_WI, 48_000), 120_000)
+const TAIL_RESERVE = REPORT_RESERVE + EDITOR_RESERVE // editor (parallel) + report share this
 
 // ---------------------------------------------------------------------------
 // Per-role model strategy (tweak one line to re-balance cost/quality).
@@ -140,7 +149,9 @@ const AXES = (VARIANT === 'goals')
     }
 const startSpent = budget?.spent?.() ?? 0
 const spentHere = () => (budget?.spent?.() ?? startSpent) - startSpent
-const analysisBudgetExhausted = () => spentHere() >= (TOKEN_CAP - REPORT_RESERVE)
+// Gate for the analysis pipeline + reverse-diff + editor: stop spending once the remaining
+// headroom drops below the whole tail (editor + report), so neither is starved.
+const analysisBudgetExhausted = () => spentHere() >= (TOKEN_CAP - TAIL_RESERVE)
 const budgetSkipped = []
 let budgetHit = false
 const flagBudget = (what) => {
@@ -594,7 +605,7 @@ ${EDITOR_BUCKETS}
 ${EDITOR_NO_CODE_REFS}
 
 CHECKS (fidelity is ASYMMETRIC: technical lossless+faithful, product grounded but may rephrase)
-A) TECHNICAL FIDELITY: every technical fact of each WI (endpoints, events, db entities, validations, ordering, impl notes) survives in "### Specifiche tecniche" — nothing dropped or invented; non-WI sections copied unchanged.
+A) TECHNICAL FIDELITY: every technical fact of each WI (endpoints, events, db entities, validations, ordering, impl notes) survives in "### Specifiche tecniche" — nothing dropped or invented; non-WI sections copied unchanged EXCEPT the two allowed edits (obvious typo fixes like "Inoltree" -> "Inoltre", and stripped code references) — do NOT flag those as violations.
 B) PRODUCT GROUNDING: "### Requisiti di prodotto" reads as a real product view (user need / goal / outcome / business rule), every claim TRACEABLE to the SRS (Overview/Vincoli/Assunzioni/UI-UX/WI) — flag invented facts AND flag implementation/functional details masquerading as product requirements. Purely-technical WI must carry the "_(nessun requisito di prodotto dedicato…)_" marker, not padding.
 C) NO CODE REFERENCES: grep for ANY file path, line number, :NN-NN range or "Riferimento codice" — must be ZERO.
 D) ENRICHMENT: spec-worthy reverse-diff behaviors appear among the requirements (or the trailing "Comportamenti rilevati dal codice" section), phrased as requirements not diff notes; non-spec-worthy ones appear ONLY in the "## Rilievi implementativi (non requisiti)" appendix; every added line carries the marker "_(da reverse-diff …)_"; nothing code-derived is unmarked; no codeRefs leaked.
@@ -731,16 +742,14 @@ if (analysisBudgetExhausted()) {
   reverseDiffDone = Boolean(rev)
 }
 
-// RF-FLOW-7 — Report (always attempted within REPORT_RESERVE; documents the cap status in RR-5)
-// + ADDED STEP — editor (srs-improved.md): independent of the report, so the two run in parallel.
-//   The editor is itself a sub-pipeline: two haiku readers (SRS digest ∥ reverse-diff
-//   extract) converge into the sonnet editor, which assembles + enriches the improved SRS,
-//   then an independent adversarial verifier + one rework checks it.
-//   Budget gate decided BEFORE building budgetInfo, so a skipped editor shows up in RR-5.
+// RF-FLOW-7 — Report + ADDED STEP editor (srs-improved.md), run IN PARALLEL. The analysis
+//   pipeline reserved TAIL_RESERVE (= REPORT_RESERVE + the per-WI EDITOR_RESERVE) so both fit;
+//   the editor is a sub-pipeline (two haiku readers → sonnet converge → adversarial verify → one
+//   rework). Budget gate decided BEFORE building budgetInfo, so a skipped editor shows up in RR-5.
 phase('Report')
 const skipEditor = analysisBudgetExhausted()
 if (skipEditor) { budgetSkipped.push('editor'); flagBudget('editor (srs-improved.md, with reverse-diff enrichment)') }
-const budgetInfo = `TOKEN CAP for this run: ${TOKEN_CAP} output tokens (best-effort, enforced at agent-spawn checkpoints; runtime hard-throw only with a user "+Nk" directive). In-workflow spend (budget.spent() delta) at report time: ~${spentHere()}. Cap hit: ${budgetHit ? 'YES' : 'no'}.${budgetSkipped.length ? ` Skipped for budget (NOT silently truncated): ${budgetSkipped.join(', ')}.` : ''} PER-ROLE MODEL MIX: ${modelMix}. CAVEAT: a mixed-model run is NOT cost-comparable 1:1 with a uniform-Opus run — state this when comparing RR-5 against the goals variant.`
+const budgetInfo = `TOKEN CAP for this run: ${TOKEN_CAP} output tokens (arg-parametrizable, default 500k; best-effort, enforced at agent-spawn checkpoints; runtime hard-throw only with a user "+Nk" directive). TAIL RESERVE held back by the analysis pipeline for the parallel tail: ${TAIL_RESERVE} = report ${REPORT_RESERVE} + editor ${EDITOR_RESERVE} (~${EDITOR_TOKENS_PER_WI}/WI × ${units.length} WI, clamped). In-workflow spend (budget.spent() delta) at report time: ~${spentHere()}. Cap hit: ${budgetHit ? 'YES' : 'no'}.${budgetSkipped.length ? ` Skipped for budget (NOT silently truncated): ${budgetSkipped.join(', ')}.` : ''} PER-ROLE MODEL MIX: ${modelMix}. CAVEAT: a mixed-model run is NOT cost-comparable 1:1 with a uniform-Opus run — state this when comparing RR-5 against the goals variant.`
 
 // Editor sub-pipeline: two haiku readers (parallel) -> sonnet converge ->
 // independent adversarial verify + one rework.
