@@ -3,10 +3,11 @@ export const meta = {
   description: 'Spec-vs-code as a dynamic workflow, A/B-parameterized by args.variant ("prescriptive" default | "goals"): context in parallel, fan-out of N analyzers from the SRS sections, adversarial verification + bounded rework in a pipeline, reverse diff, report. The orchestration skeleton is IDENTICAL across variants — only the two experimental axes differ (axis a = spec style: step-by-step PROCEDURE vs Objective/Contract/Guardrail; axis b = discovery freedom: fixed numeric caps vs budget+judgment).',
   whenToUse: 'After the interactive preflight (credentials + gh check, fetch_atlassian.py, RF-FLOW-2 confirmation and SRS segmentation into <=10 units). Inputs are passed via args (set args.variant to pick the A/B arm). It does NOT run the fetch nor the user confirmation itself. For an A/B comparison, run both variants on the SAME repo/branch/units, into SEPARATE output dirs.',
   phases: [
-    { title: 'Context', detail: 'cartografo || crawler (parallel, independent)', model: 'haiku' },
+    { title: 'Context', detail: 'cartographer || crawler (parallel, independent)', model: 'haiku' },
     { title: 'Analysis', detail: 'fan-out: one analyzer per SRS unit', model: 'opus' },
     { title: 'Verification', detail: 'verifier (opus) per finding + bounded rework (opus, <=1 round)', model: 'opus' },
-    { title: 'Reverse diff', detail: 'ricognitore-inverso over the definitive findings', model: 'sonnet' },
+    { title: 'Reverse diff', detail: 'reverse-scout over the definitive findings', model: 'sonnet' },
+    { title: 'SRS improved', detail: 'editor (sonnet) fed by two haiku readers (SRS digest ∥ reverse-diff extract): each Work Item restructured into product requirements vs technical specs AND enriched with the reverse-diff code->spec behaviors, then an INDEPENDENT adversarial verifier + one rework over srs-improved.md (importable into a new Confluence page)', model: 'sonnet' },
     { title: 'Report', detail: 'final synthesis report.md with RR-4 and RR-5', model: 'sonnet' },
   ],
 }
@@ -26,10 +27,13 @@ export const meta = {
 //     mergeNote:  "free-text note about section merges performed" | null
 //   }
 // All artifacts live under the session launch cwd (never /tmp).
-// Role names in labels/headers (cartografo, crawler, analizzatore, verifier,
-// ricognitore-inverso) are kept verbatim for traceability to the plugin's
-// agents/*.md and the requirements doc; only the working language is English.
-// The final report.md is written in ITALIAN on purpose (see reportPrompt).
+// The role names (cartographer, crawler, analyzer, verifier, reverse-scout) are the
+// English working names of the plugin's agents/*.md roles (originally Italian); only
+// the working language is English. The editor (srs-improved.md) is an ADDED role with
+// no agents/*.md counterpart, variant-agnostic; it restructures the original SRS AND
+// enriches it with the reverse-diff (code->spec) behaviors. It is itself a sub-pipeline:
+// a sonnet converge step fed by two haiku readers (one per source doc). The final
+// report.md is written in ITALIAN on purpose (see reportPrompt).
 // ---------------------------------------------------------------------------
 
 // Normalize args: the Workflow runtime sometimes delivers the `args` input as a
@@ -67,7 +71,7 @@ if (badUnits.length > 0) {
   throw new Error(`Malformed args.units: every unit needs a non-empty 'idx' and 'titolo'. Offending units: ${badUnits.map(({ u, i }) => u?.idx ?? `#${i}`).join(', ')}.`)
 }
 
-// Defend against duplicate idx: they collide on labels (analizzatore:<idx>), on
+// Defend against duplicate idx: they collide on labels (analyzer:<idx>), on
 // reviews/<idx>-… naming, and on the report overview/verdicts rows.
 const dupIdx = units.map((u) => u.idx).filter((id, i, all) => all.indexOf(id) !== i)
 if (dupIdx.length > 0) {
@@ -86,16 +90,25 @@ if (units.length > 10) {
 // budget.spent() is the WHOLE-TURN shared output-token pool, so we measure the DELTA
 // from workflow start. This is a BEST-EFFORT ceiling enforced at agent-spawn
 // checkpoints (skip-with-flag, never silent): the runtime's hard auto-throw only
-// kicks in when the USER sets a "+Nk" directive (budget.total). We keep a reserve so
-// a (partial) report can always be written. Skips are recorded for RR-5.
+// kicks in when the USER sets a "+Nk" directive (budget.total). Skips are recorded for RR-5.
+//
+// The TAIL_RESERVE is the headroom the analysis pipeline must leave for everything that
+// runs AFTER it — the editor sub-pipeline (which runs IN PARALLEL with the report) and
+// the report itself. The editor portion scales per Work Item (it restructures + enriches
+// one product/technical split per WI, then verifies + reworks the whole doc), so it is
+// derived from units.length rather than a flat number; the report portion is ~fixed.
+// TOKEN_CAP is an arg (default 500k) so the ceiling is parametrizable per run.
 // ---------------------------------------------------------------------------
-const TOKEN_CAP = 500_000
-const REPORT_RESERVE = 40_000 // headroom kept for the final report agent
+const TOKEN_CAP = Number(A.tokenCap) > 0 ? Number(A.tokenCap) : 500_000
+const REPORT_RESERVE = 40_000        // headroom kept for the final report agent
+const EDITOR_TOKENS_PER_WI = 8_000   // ~converge + verify + rework output per WI (haiku readers are cheap); rough, from validation runs
+const EDITOR_RESERVE = Math.min(Math.max(units.length * EDITOR_TOKENS_PER_WI, 48_000), 120_000)
+const TAIL_RESERVE = REPORT_RESERVE + EDITOR_RESERVE // editor (parallel) + report share this
 
 // ---------------------------------------------------------------------------
 // Per-role model strategy (tweak one line to re-balance cost/quality).
 // Values: 'opus' (max correctness) | 'sonnet' (balanced) | 'haiku' (cheap/fast).
-// Rationale: the 3 correctness-critical roles (analizzatore, verifier, rework)
+// Rationale: the 3 correctness-critical roles (analyzer, verifier, rework)
 // stay on Opus; the 2 mechanical discovery roles go Haiku (also much faster);
 // the 2 secondary/synthesis roles go Sonnet. Cost lever: drop verifier→'sonnet'
 // for a bigger saving at the cost of adversarial catch-rate on subtle cases.
@@ -103,12 +116,15 @@ const REPORT_RESERVE = 40_000 // headroom kept for the final report agent
 // run — this is surfaced in RR-5.
 // ---------------------------------------------------------------------------
 const MODELS = {
-  cartografo: 'haiku',
+  cartographer: 'haiku',
   crawler: 'haiku',
-  analizzatore: 'opus',
+  analyzer: 'opus',
   verifier: 'opus',
   rework: 'opus',
-  ricognitore: 'sonnet',
+  reverseScout: 'sonnet',
+  editorReader: 'haiku',  // the two doc-readers spawned under the editor (SRS digest + reverse-diff extract)
+  editor: 'sonnet',       // the converge + rework step that assembles/enriches srs-improved.md
+  editorVerify: 'sonnet', // the independent adversarial verifier of srs-improved.md
   report: 'sonnet',
 }
 const modelMix = Object.entries(MODELS).map(([k, v]) => `${k}=${v}`).join(', ')
@@ -124,16 +140,18 @@ const AXES = (VARIANT === 'goals')
   ? {
       style: 'GOALS',
       styleDesc: 'roles/playbook expressed as Objective / Input / Output-contract / Guardrail-invariants — outcomes constrained, not the steps ("vincola gli esiti, non i percorsi")',
-      discovery: 'BUDGET + JUDGMENT — no fixed numeric ceilings on discovery; the agent decides how many PRs to enrich within a reasonable cost budget, flagging every cut (never a silent truncation). The role boundary (crawler = global bulk harvester; analizzatore = targeted gap-fill) and the cost guardrails fan-out<=10 / rework<=1 are kept',
+      discovery: 'BUDGET + JUDGMENT — no fixed numeric ceilings on discovery; the agent decides how many PRs to enrich within a reasonable cost budget, flagging every cut (never a silent truncation). The role boundary (crawler = global bulk harvester; analyzer = targeted gap-fill) and the cost guardrails fan-out<=10 / rework<=1 are kept',
     }
   : {
       style: 'PRESCRIPTIVE',
       styleDesc: 'roles/playbook as step-by-step numbered PROCEDUREs',
-      discovery: 'FIXED NUMERIC CAPS — ~30 enriched PRs (crawler) and <=3 new PRs per section (analizzatore gap-fill), plus the S1-S4 signal taxonomy',
+      discovery: 'FIXED NUMERIC CAPS — ~30 enriched PRs (crawler) and <=3 new PRs per section (analyzer gap-fill), plus the S1-S4 signal taxonomy',
     }
 const startSpent = budget?.spent?.() ?? 0
 const spentHere = () => (budget?.spent?.() ?? startSpent) - startSpent
-const analysisBudgetExhausted = () => spentHere() >= (TOKEN_CAP - REPORT_RESERVE)
+// Gate for the analysis pipeline + reverse-diff + editor: stop spending once the remaining
+// headroom drops below the whole tail (editor + report), so neither is starved.
+const analysisBudgetExhausted = () => spentHere() >= (TOKEN_CAP - TAIL_RESERVE)
 const budgetSkipped = []
 let budgetHit = false
 const flagBudget = (what) => {
@@ -193,6 +211,95 @@ const VERIFIER_SCHEMA = {
   },
 }
 
+const EDITOR_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['srsImprovedPath'],
+  properties: {
+    srsImprovedPath: { type: 'string', description: 'path of the improved SRS markdown written (srs-improved.md)' },
+    sectionsSplit: { type: 'number', description: 'number of Work Items restructured into product/technical' },
+    enrichedFromReverseDiff: { type: 'number', description: 'number of reverse-diff behaviors placed in the improved SRS, incl. the implementation-notes appendix (0 if reverse-diff absent)' },
+    summary: { type: 'string', description: 'one-line summary (state how many reverse-diff items were merged as requirements vs parked in the implementation-notes appendix)' },
+  },
+}
+
+// Verdict of the independent adversarial verifier run against srs-improved.md (in-band, no file).
+const EDITOR_VERIFY_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['verdict'],
+  properties: {
+    verdict: { type: 'string', enum: ['confirmed', 'revise'] },
+    objections: { type: 'string', description: 'if revise: pointed, actionable list of objections (quote offending lines/sections); otherwise empty' },
+  },
+}
+
+// Digest emitted by the haiku SRS reader spawned under the editor: faithful technical
+// content per Work Item + any product-intent sentences + verbatim non-WI sections, so
+// the sonnet converge step can author the product view and assemble the technical view.
+const SRS_DIGEST_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['workItems'],
+  properties: {
+    workItems: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['heading'],
+        properties: {
+          heading: { type: 'string', description: 'the [Work Item N] heading, verbatim' },
+          product: { type: 'array', items: { type: 'string' }, description: 'sentences in the WI that already express user need / feature goal / business outcome (often few or none) — raw material for the authored product view' },
+          technical: { type: 'array', items: { type: 'string' }, description: 'the WI body kept FAITHFUL (the HOW), snippets/identifiers verbatim, file paths and line refs DROPPED' },
+          subheadings: { type: 'array', items: { type: 'string' }, description: 'pre-existing sub-headings inside the WI, verbatim' },
+        },
+      },
+    },
+    otherSections: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['heading'],
+        properties: {
+          heading: { type: 'string', description: 'non-WI section heading — esp. Overview, Vincoli e assunzioni, Assunzioni funzionali, UI/UX (product-context, mined for the product view), plus Scenari di test, Change log, ...' },
+          body: { type: 'string', description: 'the section body verbatim (to be copied unchanged / mined for product context)' },
+        },
+      },
+    },
+  },
+}
+
+// Digest emitted by the haiku reverse-diff reader spawned under the editor: the
+// behaviors that ARE in code but ABSENT from the SRS, each mapped to the WI it
+// best belongs to (or "none" for a tail section).
+const REVDIFF_DIGEST_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['present', 'behaviors'],
+  properties: {
+    present: { type: 'boolean', description: 'true if reverse-diff.md existed and was non-empty' },
+    behaviors: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['titolo', 'targetWorkItem', 'specWorthy'],
+        properties: {
+          titolo: { type: 'string', description: 'short Italian title of the undocumented behavior' },
+          specWorthy: { type: 'boolean', description: 'true if it is a contract / business rule / error-semantics / observable behavior the SRS OUGHT to document; false if incidental implementation detail (internal status-code choice, in-memory optimization, etc.)' },
+          productReq: { type: 'string', description: 'one-line requirement in SRS voice (the behavior as a rule/outcome, Italian); fill ONLY if it has a genuine user/business dimension, else ""' },
+          technicalDetail: { type: 'string', description: 'the behavior as a spec statement in Italian (NOT a diff note); endpoints/identifiers/snippets/db-entities verbatim, NO file paths or line numbers' },
+          codeRefs: { type: 'string', description: 'code references path:line — INTERNAL traceability only, never written into the document' },
+          targetWorkItem: { type: 'string', description: 'the [Work Item N] heading it best belongs to, or "none"' },
+          why: { type: 'string', description: 'why it is absent from the SRS' },
+        },
+      },
+    },
+  },
+}
+
 const REPORT_SCHEMA = {
   type: 'object',
   additionalProperties: true,
@@ -206,9 +313,9 @@ const REPORT_SCHEMA = {
 // ---------------------------------------------------------------------------
 // Role prompts (inlined, faithful to the prescriptive variant's agents/*.md)
 // ---------------------------------------------------------------------------
-const cartografoPrompt = `${COMMON}
+const cartographerPrompt = `${COMMON}
 
-ROLE: CARTOGRAFO (RF-7) - repository map, run ONCE.
+ROLE: CARTOGRAPHER (RF-7) - repository map, run ONCE.
 TOOLS: Bash, Read, Write only.
 Build the as-is orientation of the repo for all the other roles. Do NOT read file contents: produce orientation only.
 
@@ -223,7 +330,7 @@ Return a short text summary (number of areas, index path).`
 
 const crawlerPrompt = `${COMMON}
 
-ROLE: CRAWLER (RF-8, §10.1) - PR & comment discovery, stage A, run ONCE, in PARALLEL with the cartografo (you do NOT depend on repo-map/). You are the ONLY bulk harvester of comments.
+ROLE: CRAWLER (RF-8, §10.1) - PR & comment discovery, stage A, run ONCE, in PARALLEL with the cartographer (you do NOT depend on repo-map/). You are the ONLY bulk harvester of comments.
 TOOLS: Bash, Read, Write only.
 
 PROCEDURE
@@ -240,9 +347,9 @@ OUTPUT: ${base}/comments.md. At the HEAD the PR->path index: | PR | Title | Stat
 Discovery does NOT stop at Jira links; open PRs = context; no secrets.
 Return a short summary (candidate PRs, enriched, discarded, any cut).`
 
-const analizzatorePrompt = (u) => `${COMMON}
+const analyzerPrompt = (u) => `${COMMON}
 
-ROLE: ANALIZZATORE (RF-9, §10.2) - spec->code coverage for ONE section, in fan-out. You are NOT a bulk harvester: broad discovery belongs to the crawler; you only do targeted gap-fill on your own paths.
+ROLE: ANALYZER (RF-9, §10.2) - spec->code coverage for ONE section, in fan-out. You are NOT a bulk harvester: broad discovery belongs to the crawler; you only do targeted gap-fill on your own paths.
 TOOLS: Bash, Read, Grep, Write only.
 
 ASSIGNED SECTION
@@ -275,7 +382,7 @@ INPUT
 PROCEDURE
 1. Re-read the section's requirement prose and the finding.
 2. Verify that EVERY cited code reference ACTUALLY exists on branch ${branch} (file and line) and that it SUPPORTS the declared status. Flag non-existent or irrelevant references (also check for off-by-one on the lines).
-3. Independently RE-LOCATE the section's as-is code looking for coverage or gaps NOT seen by the analizzatore.
+3. Independently RE-LOCATE the section's as-is code looking for coverage or gaps NOT seen by the analyzer.
 4. Check correct use of the status/gap enums and respect for as-is truth.
 5. Emit the verdict.
 
@@ -285,7 +392,7 @@ Return the structured object (idx, verdetto, reviewPath, contestazioni).`
 
 const reworkPrompt = (idx, titolo, findingPath, objections) => `${COMMON}
 
-ROLE: ANALIZZATORE - REWORK (RF-FLOW-5), a single round.
+ROLE: ANALYZER - REWORK (RF-FLOW-5), a single round.
 TOOLS: Bash, Read, Grep, Write only.
 The verifier issued a 'revise' verdict on the finding ${findingPath} (section ${idx} - ${titolo}).
 Address the objections below and REWRITE ${findingPath} as the DEFINITIVE version (single round: if something stays unresolvable, note it in the finding as a "residual objection").
@@ -296,9 +403,9 @@ ${objections}
 Keep the finding contract (status enum, path:line references verified on ${branch}, gap enum, doubts, any code-side PRs). As-is truth; no secrets.
 Return the updated structured object (idx, titolo, stato, gap, findingPath, note).`
 
-const ricognitorePrompt = `${COMMON}
+const reverseScoutPrompt = `${COMMON}
 
-ROLE: RICOGNITORE-INVERSO (RF-10) - reverse diff code->spec, run AFTER verification. Mirror of the analizzatore: start from the CODE and look for what is NOT documented in the SRS.
+ROLE: REVERSE-SCOUT (RF-10) - reverse diff code->spec, run AFTER verification. Mirror of the analyzer: start from the CODE and look for what is NOT documented in the SRS.
 TOOLS: Bash, Read, Glob, Grep, Write only.
 
 PROCEDURE
@@ -319,9 +426,9 @@ Return a short summary (number of entries).`
 // numbered PROCEDURE to Objective / Output-contract / Guardrail-invariants, and
 // the discovery caps become "budget + judgment". This is exactly axis (a)+(b).
 // ---------------------------------------------------------------------------
-const cartografoPromptGoals = `${COMMON}
+const cartographerPromptGoals = `${COMMON}
 
-ROLE: CARTOGRAFO (RF-7) - repository map, run ONCE. GOALS STYLE (constrain the outcome, not the steps).
+ROLE: CARTOGRAPHER (RF-7) - repository map, run ONCE. GOALS STYLE (constrain the outcome, not the steps).
 TOOLS: Bash, Read, Write only.
 
 OBJECTIVE: produce enough as-is orientation of the repo that the other roles can locate code without re-reading everything. Orientation only - do NOT read file contents.
@@ -331,7 +438,7 @@ Return a short text summary (number of areas, index path).`
 
 const crawlerPromptGoals = `${COMMON}
 
-ROLE: CRAWLER (RF-8, §10.1) - PR & comment discovery, run ONCE, in PARALLEL with the cartografo (you do NOT depend on repo-map/). GOALS STYLE. You are the ONLY bulk harvester of comments.
+ROLE: CRAWLER (RF-8, §10.1) - PR & comment discovery, run ONCE, in PARALLEL with the cartographer (you do NOT depend on repo-map/). GOALS STYLE. You are the ONLY bulk harvester of comments.
 TOOLS: Bash, Read, Write only.
 
 OBJECTIVE: a pre-localization overview of the PRs and comments relevant to this feature/domain.
@@ -339,9 +446,9 @@ OUTPUT CONTRACT: ${base}/comments.md with, at the HEAD, an index that makes the 
 GUARDRAILS/INVARIANTS: discovery does NOT stop at Jira links - draw on AT LEAST Jira remote links, issue keys, feature terms from ${srsPath}, OPEN PRs against ${branch}, AND any other useful signal, by judgment (the concrete queries/commands are YOURS to choose); dedupe (same author+text) and filter noise (bots, LGTM, CI); OPEN PRs = context, NOT coverage. COST BUDGET, NO FIXED NUMERIC CEILING: keep the number of enriched PRs reasonable, prioritize by relevance, and FLAG every cut - never a silent truncation. Judgment decides how many PRs deserve enrichment. No secrets.
 Return a short summary (candidate PRs, enriched, discarded, any flagged cut).`
 
-const analizzatorePromptGoals = (u) => `${COMMON}
+const analyzerPromptGoals = (u) => `${COMMON}
 
-ROLE: ANALIZZATORE (RF-9, §10.2) - spec->code coverage for ONE section, in fan-out. GOALS STYLE. You are NOT a bulk harvester: broad discovery belongs to the crawler.
+ROLE: ANALYZER (RF-9, §10.2) - spec->code coverage for ONE section, in fan-out. GOALS STYLE. You are NOT a bulk harvester: broad discovery belongs to the crawler.
 TOOLS: Bash, Read, Grep, Write only.
 
 ASSIGNED SECTION
@@ -371,7 +478,7 @@ Return the structured object (idx, verdetto, reviewPath, contestazioni).`
 
 const reworkPromptGoals = (idx, titolo, findingPath, objections) => `${COMMON}
 
-ROLE: ANALIZZATORE - REWORK (RF-FLOW-5), a single round. GOALS STYLE.
+ROLE: ANALYZER - REWORK (RF-FLOW-5), a single round. GOALS STYLE.
 TOOLS: Bash, Read, Grep, Write only.
 The verifier issued a 'revise' verdict on the finding ${findingPath} (section ${idx} - ${titolo}).
 
@@ -381,9 +488,9 @@ ${objections}
 OUTPUT CONTRACT / GUARDRAILS: keep the finding contract (status enum, path:line references verified on ${branch}, gap enum, doubts, any code-side PRs); as-is truth; no secrets.
 Return the updated structured object (idx, titolo, stato, gap, findingPath, note).`
 
-const ricognitorePromptGoals = `${COMMON}
+const reverseScoutPromptGoals = `${COMMON}
 
-ROLE: RICOGNITORE-INVERSO (RF-10) - reverse diff code->spec, run AFTER verification. GOALS STYLE. Mirror of the analizzatore: start from the CODE and find what is NOT documented in the SRS.
+ROLE: REVERSE-SCOUT (RF-10) - reverse diff code->spec, run AFTER verification. GOALS STYLE. Mirror of the analyzer: start from the CODE and find what is NOT documented in the SRS.
 TOOLS: Bash, Read, Glob, Grep, Write only.
 
 OBJECTIVE: identify behaviors in the code (endpoints, rules, edge cases) that are undocumented in the SRS.
@@ -393,8 +500,136 @@ Return a short summary (number of entries).`
 
 // Variant selector: the orchestration below references P.* only — the skeleton is identical.
 const P = (VARIANT === 'goals')
-  ? { cartografo: cartografoPromptGoals, crawler: crawlerPromptGoals, analizzatore: analizzatorePromptGoals, verifier: verifierPromptGoals, rework: reworkPromptGoals, ricognitore: ricognitorePromptGoals }
-  : { cartografo: cartografoPrompt, crawler: crawlerPrompt, analizzatore: analizzatorePrompt, verifier: verifierPrompt, rework: reworkPrompt, ricognitore: ricognitorePrompt }
+  ? { cartographer: cartographerPromptGoals, crawler: crawlerPromptGoals, analyzer: analyzerPromptGoals, verifier: verifierPromptGoals, rework: reworkPromptGoals, reverseScout: reverseScoutPromptGoals }
+  : { cartographer: cartographerPrompt, crawler: crawlerPrompt, analyzer: analyzerPrompt, verifier: verifierPrompt, rework: reworkPrompt, reverseScout: reverseScoutPrompt }
+
+// Editor: markdown in, markdown out. The improved SRS is a derivative PROPOSAL
+// the user reviews and imports into a NEW Confluence page (Insert > Markup > Markdown).
+// Variant-agnostic restructuring, now ENRICHED with the reverse-diff (code->spec)
+// behaviors. Topology: the sonnet converge step is fed by two haiku readers (one per
+// source doc) that run in parallel and converge back into the converge step.
+const editorOut = `${base}/srs-improved.md`
+const reverseDiffPath = `${base}/reverse-diff.md`
+
+// Shared editor policy — reused VERBATIM by the SRS-reader (classifier) and the converge step,
+// so both agree on (a) product requirement vs technical spec and (b) the ban on code references.
+// The quoted Italian strings are LITERALS the editor must emit (the output doc is Italian).
+const EDITOR_BUCKETS = `
+PRODUCT vs TECHNICAL — two DERIVED VIEWS of each Work Item, NOT a verbatim partition of its sentences:
+- "Requisiti di prodotto" = a SYNTHESIZED, GROUNDED product view: the user need, the feature goal/value, the observable behavior/outcome and business rules as the user/consumer experiences them (acceptance-style where natural). You MAY rephrase and condense — it need NOT be verbatim or same-length — but every statement MUST be traceable to the SRS. Draw the product framing from the product-context sections (Overview, Vincoli e assunzioni, Assunzioni funzionali, UI/UX) AND the Work Item's own intent. Invent nothing. If a Work Item is purely technical/enabling (no user-facing dimension), the product subsection is exactly: "_(nessun requisito di prodotto dedicato: WI tecnico/abilitante)_".
+- "Specifiche tecniche" = the HOW, kept FAITHFUL and LOSSLESS from the Work Item body: endpoints & contracts, request/response shapes, validations, config parameters, events, db entities/tables/columns, schemas, protobuf events, merge/migration ordering, implementation notes. No technical fact may be dropped or invented.
+- FIDELITY IS ASYMMETRIC: the technical view loses nothing and invents nothing; the product view may rephrase but adds no facts not in the SRS. A detail is product ONLY if it expresses a user need, feature goal or business value; otherwise it is technical.`.trim()
+
+const EDITOR_NO_CODE_REFS = `
+NO CODE REFERENCES in the document (files and line numbers change over time — keep them out):
+- FORBIDDEN: file paths (e.g. packages/.../config.ts), line numbers, :NN-NN ranges, "Riferimento codice:" labels, source file names.
+- ALLOWED: code snippets (\`\`\` blocks), event names (e.g. PurposeTemplateEServiceTemplateLinkedV2), db entities/tables/columns (e.g. eservice_template_version_purpose_template), API endpoints (e.g. POST /purposeTemplates/:id/linkEserviceTemplates).`.trim()
+
+// Haiku reader #1 — reads the ORIGINAL SRS and emits the per-WI product/technical split.
+const srsReaderPrompt = `${COMMON}
+
+ROLE: EDITOR / SRS-READER - haiku reader under the editor. Read ONLY ${srsPath}. TOOLS: Read, Glob, Grep only.
+GOAL: digest the FULL SRS into the structured object below for the converge step (which authors the product view + assembles the technical view). You do NOT write the final document.
+
+${EDITOR_NO_CODE_REFS}
+
+RULES
+1. For every "[Work Item N]": fill technical[] with the WI body kept FAITHFUL (the HOW — endpoints, events, db entities, validations, ordering, impl notes), snippets/SQL/identifiers verbatim but file paths and line references DROPPED; fill product[] with any sentences in the WI that ALREADY express a user need / feature goal / business outcome (often few or none — that is fine, the converge step authors the product view from these plus the product-context sections).
+2. Record pre-existing sub-headings inside each WI verbatim (subheadings[]).
+3. Copy EVERY non-WI section VERBATIM into otherSections[] (heading + body) — especially Overview, Vincoli e assunzioni, Assunzioni funzionali, UI/UX (the converge step mines these for product framing), plus Scenari di test, Change log, etc.
+4. Don't invent or duplicate. technical[] must be COMPLETE for each WI; a stripped code reference is the only allowed removal.
+
+Return the structured object (workItems[], otherSections[]).`
+
+// Haiku reader #2 — reads the reverse-diff and extracts the code->spec behaviors to merge in.
+const revReaderPrompt = `${COMMON}
+
+ROLE: EDITOR / REVERSE-DIFF-READER - haiku reader under the editor. Read ONLY ${reverseDiffPath}. TOOLS: Read, Glob, Grep only.
+GOAL: extract the behaviors that ARE in the code but ABSENT from the SRS, so the converge step can enrich the improved SRS.
+
+RULES
+1. If ${reverseDiffPath} is missing or empty, return { present: false, behaviors: [] } (Glob/Grep to check; do NOT error).
+2. For EACH undocumented behavior emit: titolo; specWorthy (true if it is a contract / business rule / error-semantics / observable behavior the SRS OUGHT to document; false if incidental implementation detail — e.g. an internal status-code choice, an in-memory optimization); productReq (one-line requirement in SRS voice — the behavior as a rule/outcome, Italian — fill ONLY if it has a genuine user/business dimension, else ""); technicalDetail (the behavior phrased as a spec statement in Italian, NOT as a diff note — keep endpoints/identifiers/snippets/db-entities verbatim, NO file paths or line numbers); codeRefs (path:line, INTERNAL traceability only — never written to the document); why (why it is absent from the SRS).
+3. targetWorkItem: map to the "[Work Item N]" it best belongs to, or "none".
+4. Extract, don't invent. The reverse diff is ITALIAN; keep it Italian.
+
+Return the structured object (present, behaviors[]).`
+
+// Sonnet converge — assembles the improved SRS from the two digests and enriches it.
+const editorConvergePrompt = (srsDigest, revDigest, reverseDiffExpected) => `${COMMON}
+
+ROLE: EDITOR (SRS-IMPROVED) - the CONVERGE step. Two haiku readers digested the source docs; you assemble the final document and ENRICH it with the reverse-diff behaviors.
+TOOLS: Read, Write, Glob, Grep only. You MAY Read ${srsPath} and ${reverseDiffPath} to verify; write ONLY ${editorOut}.
+
+INPUT (from the two haiku readers):
+- SRS digest (per-WI faithful technical[] + product-intent product[] + verbatim non-WI sections, incl. the product-context sections):
+${JSON.stringify(srsDigest, null, 2)}
+- Reverse-diff digest (code->spec behaviors with specWorthy flags; reverse-diff ${reverseDiffExpected ? 'was produced this run' : 'was NOT produced — expect present:false'}):
+${JSON.stringify(revDigest, null, 2)}
+
+GOAL: write ${editorOut}, ITALIAN markdown, same structure/tone/style as the SRS, restructured AND enriched.
+
+These two policies apply to the WHOLE document (original content AND enrichment):
+${EDITOR_BUCKETS}
+
+${EDITOR_NO_CODE_REFS}
+
+RESTRUCTURE (two derived views per Work Item)
+1. Split every "[Work Item N]" into two subsections, in order: "### Requisiti di prodotto" then "### Specifiche tecniche". AUTHOR "### Requisiti di prodotto" as a grounded product view: synthesize it from the WI's product[] sentences PLUS the product-context sections in the digest (Overview, Vincoli e assunzioni, Assunzioni funzionali, UI/UX) and the WI's intent; rephrase/condense freely but invent nothing and keep every statement traceable to the SRS. Build "### Specifiche tecniche" FAITHFULLY from the WI's technical[] — include all of it, drop no technical fact. Pre-existing sub-headings move under the right subsection, demoted one level.
+2. FIDELITY IS ASYMMETRIC: the technical view loses no technical fact and invents none; the product view may rephrase but adds no facts not in the SRS. Purely-technical WI → product subsection is exactly "_(nessun requisito di prodotto dedicato: WI tecnico/abilitante)_".
+3. Keep snippets/SQL/event names/db entities/endpoints verbatim, but STRIP every file path / line number / "Riferimento codice". Non-WI sections copied unchanged, except obvious typos ("Inoltree" -> "Inoltre") and stripped code references.
+4. No empty subsections beyond the explicit "nessun requisito di prodotto" marker above.
+
+ENRICH with the reverse diff (spec-worthy only goes into the requirements)
+5. Merge ONLY specWorthy=true behaviors into the Work Items, phrased as requirement/spec statements (NOT diff notes): for one whose targetWorkItem matches a WI, add its productReq under "### Requisiti di prodotto" (only if non-empty and genuinely product-level) and its technicalDetail under "### Specifiche tecniche". Never write codeRefs. Prefix every added line with "_(da reverse-diff — presente nel codice, assente nell'SRS originale)_ ".
+6. specWorthy=true with targetWorkItem="none": same treatment in a final section "## Comportamenti rilevati dal codice (reverse diff) non presenti nell'SRS originale".
+7. specWorthy=false behaviors: do NOT place them among requirements — collect them (marked, same prefix) in a clearly-labeled appendix "## Rilievi implementativi (non requisiti)". Omit the appendix if there are none.
+8. Enrichment is ALWAYS additive and ALWAYS marked — never fold code-derived content silently into the original prose. If the digest is present:false/empty, add no enrichment. Set enrichedFromReverseDiff to the count of behaviors actually placed in the document (requirements + appendix).
+
+An independent adversarial verifier will check this document afterwards (asymmetric fidelity, classification, no code references, spec-worthy placement, marked enrichment) and may send it back for rework — produce your best version, you do NOT self-verify here.
+
+WRITE: the Write tool refuses to overwrite a file not Read this session — if ${editorOut} exists, Read it first, then Write and read it back to confirm. Output is markdown for a NEW Confluence page (Insert > Markup > Markdown); write ONLY this file. Return the structured object (srsImprovedPath, sectionsSplit, enrichedFromReverseDiff, summary stating how many items became requirements vs went to the implementation-notes appendix).`
+
+// Single adversarial verify + one rework over srs-improved.md (replaces the editor's self-check).
+// The verifier is read-only: it returns objections in-band to the rework step, no review file.
+
+// Independent adversarial verifier — tries to FALSIFY srs-improved.md against the editor contracts.
+const editorVerifierPrompt = `${COMMON}
+
+ROLE: EDITOR / ADVERSARIAL VERIFIER - independent critic of ${editorOut}. FALSIFY it, don't rubber-stamp; you did NOT write it.
+TOOLS: Read, Glob, Grep only (read-only — write NOTHING). Read ${editorOut}, ${srsPath} and ${reverseDiffPath}.
+
+The document must satisfy these contracts — hunt for ANY violation:
+${EDITOR_BUCKETS}
+
+${EDITOR_NO_CODE_REFS}
+
+CHECKS (fidelity is ASYMMETRIC: technical lossless+faithful, product grounded but may rephrase)
+A) TECHNICAL FIDELITY: every technical fact of each WI (endpoints, events, db entities, validations, ordering, impl notes) survives in "### Specifiche tecniche" — nothing dropped or invented; non-WI sections copied unchanged EXCEPT the two allowed edits (obvious typo fixes like "Inoltree" -> "Inoltre", and stripped code references) — do NOT flag those as violations.
+B) PRODUCT GROUNDING: "### Requisiti di prodotto" reads as a real product view (user need / goal / outcome / business rule), every claim TRACEABLE to the SRS (Overview/Vincoli/Assunzioni/UI-UX/WI) — flag invented facts AND flag implementation/functional details masquerading as product requirements. Purely-technical WI must carry the "_(nessun requisito di prodotto dedicato…)_" marker, not padding.
+C) NO CODE REFERENCES: grep for ANY file path, line number, :NN-NN range or "Riferimento codice" — must be ZERO.
+D) ENRICHMENT: spec-worthy reverse-diff behaviors appear among the requirements (or the trailing "Comportamenti rilevati dal codice" section), phrased as requirements not diff notes; non-spec-worthy ones appear ONLY in the "## Rilievi implementativi (non requisiti)" appendix; every added line carries the marker "_(da reverse-diff …)_"; nothing code-derived is unmarked; no codeRefs leaked.
+
+Verdict 'confirmed' ONLY if A-D all pass; else 'revise' with a POINTED, ACTIONABLE objection list (quote the offending lines) so the rework step can fix them directly.
+Return the structured object (verdict, objections).`
+
+// One rework round — the editor fixes srs-improved.md per the verifier objections.
+const editorReworkPrompt = (objections) => `${COMMON}
+
+ROLE: EDITOR (SRS-IMPROVED) - REWORK (single round). The adversarial verifier returned 'revise' on ${editorOut}.
+TOOLS: Read, Write, Glob, Grep only. Read ${editorOut} (and ${srsPath}/${reverseDiffPath} as needed); write ONLY ${editorOut}.
+
+Policies still hold:
+${EDITOR_BUCKETS}
+
+${EDITOR_NO_CODE_REFS}
+
+Fix EVERY objection below and rewrite ${editorOut}; preserve what's already correct, add no new violations (nothing dropped/duplicated/invented, zero code references, all enrichment marked).
+
+VERIFIER OBJECTIONS:
+${objections}
+
+WRITE: Read ${editorOut} first (Write refuses un-Read files), overwrite it, then read it back to confirm it is your content. Return the structured object (srsImprovedPath, sectionsSplit, enrichedFromReverseDiff, summary).`
 
 const reportPrompt = (results, verdicts, budgetInfo) => `${COMMON}
 
@@ -411,6 +646,7 @@ MANDATORY STRUCTURE (section headings and prose in Italian)
    - Execution evidence: PRs discovered/enriched/discarded (from comments.md), flagged cuts, caps reached, judgment calls${mergeNote ? `, and this section merge: ${mergeNote}` : ''}.
    - FIDELITY NOTE (Workflow orchestration): unlike the Task-based variant, per-subagent tokens are NOT exposed in-band by the workflow. Report the flow TOTAL as read from the session (/cost) and the per-phase breakdown as visible in /workflows; time is read from the driver (date +%s timestamps) or from /workflows. Do not invent numbers: always state the source.
    - TOKEN CAP (added on top of the original spec): ${budgetInfo} — report this verbatim in the cost evidence, and if anything was skipped for budget, list it explicitly (no silent truncation).
+   - ADDED STEP (editor, on top of the original spec): ${editorOut} (each Work Item restructured into "Requisiti di prodotto" vs "Specifiche tecniche", AND enriched with the reverse-diff code->spec behaviors, each marked with a provenance tag) is generated in PARALLEL with this report by a sonnet converge step fed by two haiku readers — list it among the deliverables in RR-5 noting it may still be in progress at report time; do NOT block on it.
 
 ANALYSIS RESULTS (structured summary, validate against the files):
 ${JSON.stringify(results, null, 2)}
@@ -428,25 +664,25 @@ log(`spec-analyze (${VARIANT}) · style=${AXES.style} · ${repo}@${branch} · ${
 // RF-FLOW-3 — Context in parallel (barrier: analyzers depend on repo-map/ and comments.md)
 phase('Context')
 const [mapResult, crawlResult] = await parallel([
-  () => agent(P.cartografo, { label: 'cartografo', phase: 'Context', model: MODELS.cartografo }),
+  () => agent(P.cartographer, { label: 'cartographer', phase: 'Context', model: MODELS.cartographer }),
   () => agent(P.crawler, { label: 'crawler', phase: 'Context', model: MODELS.crawler }),
 ])
 if (!mapResult || !crawlResult) {
-  const failed = [!mapResult && 'cartografo (repo-map/)', !crawlResult && 'crawler (comments.md)'].filter(Boolean).join(' and ')
+  const failed = [!mapResult && 'cartographer (repo-map/)', !crawlResult && 'crawler (comments.md)'].filter(Boolean).join(' and ')
   throw new Error(`Context phase aborted: ${failed} failed — downstream analysis depends on it and cannot proceed reliably.`)
 }
 
 // RF-FLOW-4/5 — Fan-out analyzers -> verifier -> bounded rework, in a pipeline (no barrier between units)
 const results = await pipeline(
   units,
-  // stage 1: ANALIZZATORE (skipped-with-flag if the token cap is exhausted)
+  // stage 1: ANALYZER (skipped-with-flag if the token cap is exhausted)
   (u) => {
-    if (analysisBudgetExhausted()) { budgetSkipped.push(`analizzatore:${u.idx}`); flagBudget(`analizzatore:${u.idx}`); return null }
-    return agent(P.analizzatore(u), {
-      label: `analizzatore:${u.idx}`,
+    if (analysisBudgetExhausted()) { budgetSkipped.push(`analyzer:${u.idx}`); flagBudget(`analyzer:${u.idx}`); return null }
+    return agent(P.analyzer(u), {
+      label: `analyzer:${u.idx}`,
       phase: 'Analysis',
       schema: ANALYSIS_SCHEMA,
-      model: MODELS.analizzatore,
+      model: MODELS.analyzer,
     })
   },
   // stage 2: VERIFIER + bounded REWORK (<=1 round), per single unit
@@ -496,18 +732,59 @@ log(`analysis + verification done: ${okResults.length}/${units.length} units`)
 
 // RF-FLOW-6 — Reverse diff (after verification: uses the definitive findings; implicit barrier from awaiting the pipeline)
 phase('Reverse diff')
+let reverseDiffDone = false
 if (analysisBudgetExhausted()) {
-  budgetSkipped.push('ricognitore-inverso')
-  flagBudget('ricognitore-inverso (reverse diff)')
+  budgetSkipped.push('reverse-scout')
+  flagBudget('reverse-scout (reverse diff)')
 } else {
-  await agent(P.ricognitore, { label: 'ricognitore-inverso', phase: 'Reverse diff', model: MODELS.ricognitore })
+  const rev = await agent(P.reverseScout, { label: 'reverse-scout', phase: 'Reverse diff', model: MODELS.reverseScout })
+  // The editor enrichment depends on reverse-diff.md existing; the reader degrades gracefully if not.
+  reverseDiffDone = Boolean(rev)
 }
 
-// RF-FLOW-7 — Report (always attempted within REPORT_RESERVE; documents the cap status in RR-5)
+// RF-FLOW-7 — Report + ADDED STEP editor (srs-improved.md), run IN PARALLEL. The analysis
+//   pipeline reserved TAIL_RESERVE (= REPORT_RESERVE + the per-WI EDITOR_RESERVE) so both fit;
+//   the editor is a sub-pipeline (two haiku readers → sonnet converge → adversarial verify → one
+//   rework). Budget gate decided BEFORE building budgetInfo, so a skipped editor shows up in RR-5.
 phase('Report')
-const budgetInfo = `TOKEN CAP for this run: ${TOKEN_CAP} output tokens (best-effort, enforced at agent-spawn checkpoints; runtime hard-throw only with a user "+Nk" directive). In-workflow spend (budget.spent() delta) at report time: ~${spentHere()}. Cap hit: ${budgetHit ? 'YES' : 'no'}.${budgetSkipped.length ? ` Skipped for budget (NOT silently truncated): ${budgetSkipped.join(', ')}.` : ''} PER-ROLE MODEL MIX: ${modelMix}. CAVEAT: a mixed-model run is NOT cost-comparable 1:1 with a uniform-Opus run — state this when comparing RR-5 against the goals variant.`
-const report = await agent(reportPrompt(okResults, verdicts, budgetInfo), { label: 'report', phase: 'Report', schema: REPORT_SCHEMA, model: MODELS.report })
+const skipEditor = analysisBudgetExhausted()
+if (skipEditor) { budgetSkipped.push('editor'); flagBudget('editor (srs-improved.md, with reverse-diff enrichment)') }
+const budgetInfo = `TOKEN CAP for this run: ${TOKEN_CAP} output tokens (arg-parametrizable, default 500k; best-effort, enforced at agent-spawn checkpoints; runtime hard-throw only with a user "+Nk" directive). TAIL RESERVE held back by the analysis pipeline for the parallel tail: ${TAIL_RESERVE} = report ${REPORT_RESERVE} + editor ${EDITOR_RESERVE} (~${EDITOR_TOKENS_PER_WI}/WI × ${units.length} WI, clamped). In-workflow spend (budget.spent() delta) at report time: ~${spentHere()}. Cap hit: ${budgetHit ? 'YES' : 'no'}.${budgetSkipped.length ? ` Skipped for budget (NOT silently truncated): ${budgetSkipped.join(', ')}.` : ''} PER-ROLE MODEL MIX: ${modelMix}. CAVEAT: a mixed-model run is NOT cost-comparable 1:1 with a uniform-Opus run — state this when comparing RR-5 against the goals variant.`
+
+// Editor sub-pipeline: two haiku readers (parallel) -> sonnet converge ->
+// independent adversarial verify + one rework.
+const runEditor = async () => {
+  if (skipEditor) return null
+  const [srsDigest, revDigest] = await parallel([
+    () => agent(srsReaderPrompt, { label: 'editor:srs-reader', phase: 'SRS improved', schema: SRS_DIGEST_SCHEMA, model: MODELS.editorReader }),
+    () => agent(revReaderPrompt, { label: 'editor:revdiff-reader', phase: 'SRS improved', schema: REVDIFF_DIGEST_SCHEMA, model: MODELS.editorReader }),
+  ])
+  // The SRS digest is the backbone — without it the converge step has nothing faithful to assemble.
+  if (!srsDigest) { log('WARNING: editor SRS-reader failed — skipping srs-improved.md (no faithful digest to assemble).'); return null }
+  // The reverse-diff reader is best-effort: a null/absent digest just means no enrichment.
+  const rev = revDigest || { present: false, behaviors: [] }
+  const result = await agent(editorConvergePrompt(srsDigest, rev, reverseDiffDone), {
+    label: 'editor:converge', phase: 'SRS improved', schema: EDITOR_SCHEMA, model: MODELS.editor,
+  })
+  if (!result) return null
+
+  // Adversarial verify + one rework. The verifier is an INDEPENDENT critic that tries to
+  // falsify srs-improved.md; on 'revise' the editor reworks the file once (revise after that is on record).
+  const verdict = await agent(editorVerifierPrompt, { label: 'editor:verify', phase: 'SRS improved', schema: EDITOR_VERIFY_SCHEMA, model: MODELS.editorVerify })
+  if (!verdict) { log('WARNING: editor adversarial verifier failed — keeping the unverified srs-improved.md.'); return { ...result, editorVerify: 'verify-failed' } }
+  if (verdict.verdict === 'confirmed') { log('editor adversarial verify: confirmed.'); return { ...result, editorVerify: 'confirmed' } }
+  log('editor adversarial verify: revise — one rework round.')
+  const reworked = await agent(editorReworkPrompt(verdict.objections || '(verifier returned revise without objections — re-check all contracts)'), { label: 'editor:rework', phase: 'SRS improved', schema: EDITOR_SCHEMA, model: MODELS.editor })
+  if (!reworked) { log('WARNING: editor rework failed — keeping the pre-rework srs-improved.md with objections on record.'); return { ...result, editorVerify: 'revise->rework-failed' } }
+  return { ...reworked, editorVerify: 'revise->reworked' }
+}
+
+const [improved, report] = await parallel([
+  runEditor,
+  () => agent(reportPrompt(okResults, verdicts, budgetInfo), { label: 'report', phase: 'Report', schema: REPORT_SCHEMA, model: MODELS.report }),
+])
 if (!report) log(`WARNING: report agent failed — ${base}/report.md may be missing; findings/reviews/reverse-diff are still on disk.`)
+if (!improved && !skipEditor) log(`WARNING: editor agent failed — ${base}/srs-improved.md may be missing; the rest of the deliverables are unaffected.`)
 
 return {
   variant: VARIANT,
@@ -516,6 +793,10 @@ return {
   slug,
   reportPath: report?.reportPath,
   summary: report?.summary,
+  srsImprovedPath: improved?.srsImprovedPath,
+  srsImprovedSummary: improved?.summary,
+  srsImprovedEnriched: improved?.enrichedFromReverseDiff,
+  srsImprovedVerify: improved?.editorVerify,
   units: units.length,
   analyzed: okResults.length,
   tokenCap: TOKEN_CAP,
