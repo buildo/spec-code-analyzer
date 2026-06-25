@@ -1,0 +1,19 @@
+{
+  "name": "spec-code-analyzer",
+  "version": "1.0.0",
+  "description": "Confronta una **specifica (SRS)** con il **codice as-is** di un repository e produce un report di copertura strutturato, sezione per sezione.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@github.com-gorlemz:buildo/spec-code-analyzer.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "playwright": "^1.61.0"
+  }
+}

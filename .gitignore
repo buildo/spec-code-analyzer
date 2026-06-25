@@ -1,0 +1,11 @@
+# Secrets — never commit
+.env
+**/.env
+
+# Analysis output dirs (artifacts, may contain .env)
+.spec-analyze/
+.spec-analyze-goals/
+.spec-analyze-fe/
+
+# Node / Playwright (FE analysis)
+node_modules/
