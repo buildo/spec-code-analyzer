@@ -29,6 +29,8 @@ python3 workflows/fetch_figma.py --file-key <figmaFileKey> --discover-page <page
 ```
 Output: `design/<idx>.png`, `design-index.md` e `discovered.json` (`[{idx, figmaNode, name}]`). Se più pagine combaciano col nome (o nessuna), fai **confermare la pagina** all'utente prima del passo b.
 
+> **Fallback — API Figma non disponibile → screenshot forniti dall'utente.** Se manca `FIGMA_TOKEN`, l'API risponde **429** (il rate-limit tier "low" può bloccare ~40h: controlla l'header `Retry-After`) o non vuoi usare l'API: chiedi all'utente di **fornire le immagini** delle schermate (export/screenshot da Figma, una per schermata). Salvale come `${base}/design/<idx>.png` (idx `01,02,…` nell'ordine che l'utente conferma) e scrivi tu `design-index.md` (idx | file | nome). Poi procedi col pairing identico e lancia con **`manualDesign: true`** — la figma-shooter NON chiama l'API, usa le PNG già presenti (e `figmaNode` nelle unit diventa opzionale).
+
 **3. Pairing design → app (l'UNICO input interattivo dell'utente)**
 Per ogni schermata scoperta — mostra `design/<idx>.png` + il `name` del frame — chiedi all'utente l'**URL relativo dell'app** che porta a quella schermata (per ricostruire il flusso utente→app). Alcune schermate non sono raggiungibili dal solo URL (step di wizard, tab interne, accordion): in quei casi raccogli anche una **piccola navigazione** (`steps` + `waitFor`).
 
@@ -67,6 +69,7 @@ Passa gli `args`:
   "outputDir": "./.spec-analyze-fe", "slug": "wi10-adeguamento-fe",
   "appBaseUrl": "http://localhost:3000/ui",
   "renderedCapture": true,                        // false = solo model A (design+codice), nessun token
+  "manualDesign": false,                          // true = design/<idx>.png forniti dall'utente (fallback API bloccata); figmaNode opzionale
   "tokenCap": 500000,
   "units": [ /* ≤10, costruite ai passi 2-3: discovery + pairing */ ]
 }

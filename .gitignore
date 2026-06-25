@@ -7,6 +7,9 @@
 .spec-analyze-goals/
 .spec-analyze-fe/
 
+# Local manual-design screenshots (workflow input, not source)
+screens/
+
 # Node / Playwright (FE analysis)
 node_modules/
 

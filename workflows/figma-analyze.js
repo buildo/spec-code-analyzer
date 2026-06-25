@@ -25,6 +25,7 @@ export const meta = {
 //     slug:         "wi10-adeguamento-fe",
 //     appBaseUrl:   "http://localhost:3000/ui",            // mode B only
 //     renderedCapture: true,                               // optional; skip-with-flag if app unreachable
+//     manualDesign: false,                                 // optional; true = user-provided design/<idx>.png (Figma API fallback), figmaNode optional
 //     tokenCap:     500000,
 //     units: [ { idx:"01", titolo:"...", prose:"...", figmaNode:"3977:52475",
 //                route?:"/it/...", waitFor?:"text=...", viewport?:"1440x900",
@@ -51,18 +52,22 @@ const outputDir = A.outputDir || './.spec-analyze-fe'
 const slug = A.slug
 const appBaseUrl = A.appBaseUrl || 'http://localhost:3000/ui'
 const renderedCapture = A.renderedCapture !== false // default true; the shooter still skips-with-flag if app is down
+// manualDesign: the design screenshots are PROVIDED BY THE USER (already at <base>/design/<idx>.png) instead of
+// rendered via the Figma API — the fallback when FIGMA_TOKEN is missing or the API is rate-limited (429, the
+// "low" tier can lock for ~40h). In this mode the figma-shooter does NOT call the API and figmaNode is optional.
+const manualDesign = A.manualDesign === true
 const units = Array.isArray(A.units) ? A.units : []
 const base = `${outputDir}/${slug}`
 
 // --- arg validation (mirrors spec-analyze.js:39-79) ------------------------
-if (!fePath || !figmaFileKey || !slug || units.length === 0) {
-  throw new Error('Missing args: fePath, figmaFileKey, slug and a non-empty units[] are required. Run the interactive preflight first (creds + segmentation).')
+if (!fePath || !slug || units.length === 0 || (!manualDesign && !figmaFileKey)) {
+  throw new Error('Missing args: fePath, slug and a non-empty units[] are required (plus figmaFileKey unless manualDesign=true). Run the interactive preflight first (creds + discovery/pairing).')
 }
 const badUnits = units
   .map((u, i) => ({ u, i }))
-  .filter(({ u }) => !u || !u.idx || !(u.titolo ?? u.title) || !(u.figmaNode ?? u.node))
+  .filter(({ u }) => !u || !u.idx || !(u.titolo ?? u.title) || (!manualDesign && !(u.figmaNode ?? u.node)))
 if (badUnits.length > 0) {
-  throw new Error(`Malformed args.units: every unit needs a non-empty 'idx', 'titolo' and 'figmaNode'. Offending: ${badUnits.map(({ u, i }) => u?.idx ?? `#${i}`).join(', ')}.`)
+  throw new Error(`Malformed args.units: every unit needs a non-empty 'idx', 'titolo'${manualDesign ? '' : " and 'figmaNode'"}. Offending: ${badUnits.map(({ u, i }) => u?.idx ?? `#${i}`).join(', ')}.`)
 }
 // idx keys design/<idx>.png, app-shots/<idx>.png, findings/, reviews/ and report rows — collisions corrupt the mapping.
 const dupIdx = units.map((u) => u.idx).filter((id, i, all) => all.indexOf(id) !== i)
@@ -204,7 +209,22 @@ const unitsForApp = JSON.stringify(
   units.map((u) => ({ idx: u.idx, route: u.route, waitFor: u.waitFor, viewport: u.viewport, steps: u.steps, settle: u.settle }))
 )
 
-const figmaShooterPrompt = `${COMMON}
+const expectedIdx = units.map((u) => u.idx).join(', ')
+const idxTitles = units.map((u) => `${u.idx} = ${u.titolo ?? u.title}`).join('\n')
+const figmaShooterPrompt = manualDesign
+  ? `${COMMON}
+
+ROLE: FIGMA-SHOOTER (MANUAL design source) — the design screenshots were PROVIDED BY THE USER and already live at ${base}/design/<idx>.png. Do NOT call the Figma API, do NOT run fetch_figma.py. TOOLS: Bash, Read, Write only.
+
+PROCEDURE
+1. List ${base}/design/ and check a <idx>.png exists for each expected idx: ${expectedIdx}.
+2. Write ${base}/design-index.md: a table | idx | file | name | status | — status 'ok (user-provided)' if design/<idx>.png exists, 'MISSING' otherwise. Use EXACTLY these names (the unit titoli — do NOT invent or guess names):
+${idxTitles}
+3. Report which idx have a design/<idx>.png and which are MISSING.
+
+OUTPUT: design-index.md under ${base} (the PNGs already exist). A missing PNG is flagged, not fatal.
+Return the structured object (renderedIdx[], missingIdx[], indexPath, note='manual design screenshots').`
+  : `${COMMON}
 
 ROLE: FIGMA-SHOOTER — render the Figma design frames to PNG, run ONCE. TOOLS: Bash, Read, Write only.
 You produce the design screenshots EVERY comparison is based on; they are persisted run intermediates.
@@ -214,7 +234,8 @@ PROCEDURE
 ${unitsForFigma}
 2. Run: python3 workflows/fetch_figma.py --file-key ${figmaFileKey} --units ${base}/units.json --out ${base} --scale 1
    (the script reads FIGMA_TOKEN from env or ${outputDir}/.env or ${base}/.env — never print it; exit 0 = at least one rendered, 2 = nothing/file bad, 3 = creds.)
-3. Read ${base}/design-index.md and report which idx got a design/<idx>.png and which are MISSING.
+3. FALLBACK: if the script exits 3 (no creds) or you hit HTTP 429 (rate-limited) BUT design/<idx>.png are ALREADY present at ${base}/design/ (user-provided), use those instead of failing — they are valid design shots. Note 'fallback: pre-placed screenshots' and still write design-index.md.
+4. Read/write ${base}/design-index.md and report which idx got a design/<idx>.png and which are MISSING.
 
 OUTPUT: design/<idx>.png + design-index.md under ${base}. A missing PNG is flagged, not fatal.
 Return the structured object (renderedIdx[], missingIdx[], indexPath, note).`
@@ -267,7 +288,7 @@ ASSIGNED UNIT
 - titolo: ${u.titolo ?? u.title}
 - requirement prose:
 ${u.prose ?? u.prosa ?? '(prose not provided)'}
-- figma node: ${u.figmaNode ?? u.node}${u.route ? `\n- app route: ${u.route}` : ''}
+- figma node: ${u.figmaNode ?? u.node ?? '(design fornito come screenshot manuale — nessun node Figma)'}${u.route ? `\n- app route: ${u.route}` : ''}
 
 PROCEDURE
 1. READ THE DESIGN: Read ${base}/design/${u.idx}.png (the runtime renders the image). This is the source of truth for the intended UI.
