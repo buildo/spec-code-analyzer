@@ -19,19 +19,41 @@ printf 'REACT_APP_MOCK_TOKEN=<jwt fresco>\n' >> ~/LocalWork/PagoPa/pdnd-interop-
 ```
 Il `REACT_APP_MOCK_TOKEN` è un JWT di sessione DEV a breve scadenza: se l'app rende **vuoto**, è scaduto (`shoot_app.mjs` lo segnala come `EMPTY (no content — auth/token expired?)`).
 
-**2. Segmenta il Work Item in ≤10 screen-unit** e conferma. Ogni unit:
+**2. Gathering screenshot da Figma (l'agente — l'utente NON tocca node-id, componenti, colori o spacing)**
+Le pagine del file Figma sono nominate per epica/PIN. L'agente trova la pagina e renderizza tutti i suoi frame:
+```bash
+# a) elenca le pagine (id<TAB>nome) e individua quella che contiene l'epica/PIN (es. "PIN-8621")
+python3 workflows/fetch_figma.py --file-key <figmaFileKey> --list-pages --out ./.spec-analyze-fe/<slug>
+# b) renderizza OGNI frame-schermata di quella pagina → design/<idx>.png (idx 01,02,… in ordine di lettura)
+python3 workflows/fetch_figma.py --file-key <figmaFileKey> --discover-page <pageId> --out ./.spec-analyze-fe/<slug>
+```
+Output: `design/<idx>.png`, `design-index.md` e `discovered.json` (`[{idx, figmaNode, name}]`). Se più pagine combaciano col nome (o nessuna), fai **confermare la pagina** all'utente prima del passo b.
+
+**3. Pairing design → app (l'UNICO input interattivo dell'utente)**
+Per ogni schermata scoperta — mostra `design/<idx>.png` + il `name` del frame — chiedi all'utente l'**URL relativo dell'app** che porta a quella schermata (per ricostruire il flusso utente→app). Alcune schermate non sono raggiungibili dal solo URL (step di wizard, tab interne, accordion): in quei casi raccogli anche una **piccola navigazione** (`steps` + `waitFor`).
+
+Costruisci le unit — `idx`, `titolo` e `figmaNode` vengono da `discovered.json`; `route`/`steps`/`waitFor` dall'utente:
 ```jsonc
 {
-  "idx": "01", "titolo": "...", "prose": "<testo del requisito WI>",
-  "figmaNode": "3977:52475",                 // nodo del frame (forma API o URL)
-  "route": "/it/fruizione/template-finalita", // mode B: route STABILE da cui partire
-  "waitFor": "text=I miei template",          // opz: selettore/`networkidle`
-  "steps": [{"click":"Visualizza"},           // opz: naviga fino alla schermata
+  "idx": "03",                                 // da discovered.json
+  "titolo": "Dettaglio template — risorse",    // = name del frame (da discovered.json)
+  "figmaNode": "3977:52306",                   // da discovered.json — NON digitato a mano
+  "route": "/it/fruizione/template-finalita",  // ← URL relativo inserito dall'utente
+  "steps": [{"click":"Visualizza"},            // ← SOLO se la schermata richiede navigazione
             {"click":{"role":"tab","name":"E-service e template e-service suggeriti"}}],
-  "settle": 2500, "dataNote": "..."
+  "waitFor": "table"                           // ← asserzione univoca dello schermo target (post-steps)
 }
 ```
-Nota recipe: il deep-link diretto a una detail route rende **vuoto** — parti da una route stabile (es. la lista) e arriva alla schermata con gli `steps`.
+
+> **Coerenza unit (la garantisce il pairing)** — il `figmaNode` viene dallo screenshot scoperto e la `route`/`steps` sono inserite dall'utente PER QUELLO screenshot: per costruzione descrivono la stessa schermata. Se la `route` non riproduce quella schermata, l'analyzer alza `appShotMismatch`, scarta l'app-shot e confronta solo design↔codice.
+
+> **`waitFor` = asserzione post-steps** — selettore CSS/text **univoco** dello schermo finale (non un titolo/route condiviso). Verificato DOPO gli `steps` (i click attendono già da soli). Senza `waitFor` → status `UNVERIFIED`; se non trovato → `WRONG-SCREEN?`.
+
+Note per ricavare route/steps:
+- **Deep-link a detail/wizard rende vuoto**: parti da una route stabile (la lista) e arriva con gli `steps`.
+- **Tab**: `{"click":{"role":"tab","name":"..."}}` + `waitFor` del contenuto della tab.
+- **Accordion**: un `{"click":"..."}` per espanderlo prima dello screenshot.
+- **Schermata non riproducibile nell'app** (es. wizard step che richiede un draft attivo): lascia la unit **design-only** (ometti `route`) — meglio nessun app-shot che uno sbagliato.
 
 ## Lancio del workflow (dal main-loop di Claude Code)
 Passa gli `args`:
@@ -46,9 +68,10 @@ Passa gli `args`:
   "appBaseUrl": "http://localhost:3000/ui",
   "renderedCapture": true,                        // false = solo model A (design+codice), nessun token
   "tokenCap": 500000,
-  "units": [ /* ≤10, come sopra */ ]
+  "units": [ /* ≤10, costruite ai passi 2-3: discovery + pairing */ ]
 }
 ```
+Le `units` sono il risultato del preflight (discovery + pairing). Includi solo le schermate rilevanti per il WI (scarta i frame Figma fuori scope); se le scoperte superano 10, selezionane ≤10 — il workflow non tronca in silenzio ma avvisa.
 
 ## Output (`<outputDir>/<slug>/`)
 `design/<idx>.png` + `design-index.md` · `app-shots/<idx>.png` + `app-shots-index.md` · `repo-map/` · `comments.md` · `findings/<idx>-*.md` · `reviews/<idx>-*.md` · `reverse-diff.md` · `report.md` (IT).

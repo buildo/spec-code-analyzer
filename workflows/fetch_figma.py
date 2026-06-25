@@ -4,17 +4,25 @@
 Specchio di fetch_atlassian.py: sola stdlib di Python 3 (nessuna dipendenza), token letto
 solo da ambiente o `<out>/.env`, **mai stampato**, exit-code espliciti.
 
-Contratto (CLI):
-    fetch_figma.py --file-key <key> (--units <units.json> | --nodes <id,id,...>) \
-                   --out <output-dir> [--scale 1]
+Contratto (CLI) — una delle quattro modalità:
+    fetch_figma.py --file-key <key> --list-pages --out <dir>
+    fetch_figma.py --file-key <key> --discover-page <pageId> --out <dir> [--scale 1]
+    fetch_figma.py --file-key <key> --units <units.json> --out <dir> [--scale 1]
+    fetch_figma.py --file-key <key> --nodes <id,id,...> --out <dir> [--scale 1]
 
-`--units` è l'input CANONICO: un JSON array di unit `{ "idx": "01", "figmaNode": "3977:52475", ... }`
+`--list-pages` stampa su stdout le pagine del file (`<id>\t<nome>`) e esce: serve al preflight per trovare
+la pagina di un'epica/PIN per nome, senza che l'utente tocchi i node-id.
+`--discover-page <pageId>` ENUMERA e renderizza OGNI frame-schermata della pagina (FRAME diretti + FRAME dentro
+SECTION di primo livello), in ordine di lettura (alto→basso, sx→dx); idx assegnato 01,02,…; scrive anche
+`discovered.json` ([{idx, figmaNode, name}]) da cui il preflight costruisce le unit aggiungendo route/steps.
+`--units` è l'input CANONICO per la run: un JSON array `{ "idx": "01", "figmaNode": "3977:52475", ... }`
 (l'`idx` confermato in preflight è l'unica fonte di verità che lega design/<idx>.png a unit/finding/report).
 `--nodes` è solo un HELPER DI DEBUG: idx = posizione 1-based.
 
 Output (sotto <out>):
     design/<idx>.png      un PNG per ogni frame renderizzabile
     design-index.md       tabella: idx | node | file | name | status
+    discovered.json       (solo --discover-page) [{idx, figmaNode, name}] per il pairing del preflight
 
 Esiti (RF-6, adattati al multi-nodo):
     exit 0  -> almeno un frame renderizzato (i fallimenti per-nodo sono FLAGGATI in
@@ -97,6 +105,41 @@ def download(url, dest):
         fh.write(data)
 
 
+def get_pages(key, token):
+    """Ritorna [(id, name)] delle pagine (CANVAS) del file — una sola chiamata shallow."""
+    d = api_get(f"/files/{key}?depth=1", token)
+    doc = d.get("document") or {}
+    return [(c["id"], c.get("name", "")) for c in doc.get("children", []) if c.get("type") == "CANVAS"]
+
+
+def discover_frames(key, page_id, token):
+    """Enumera le frame-schermata di una pagina: FRAME diretti + FRAME dentro SECTION di primo livello,
+    ordinati in lettura (alto→basso, sx→dx). Ritorna (file_name, [{idx, node, name}])."""
+    q = urllib.parse.urlencode({"ids": page_id, "depth": "2"})
+    d = api_get(f"/files/{key}/nodes?{q}", token)
+    file_name = d.get("name") or key
+    page = ((d.get("nodes") or {}).get(page_id) or {}).get("document") or {}
+    frames = []
+    for child in page.get("children", []):
+        t = child.get("type")
+        if t == "FRAME":
+            frames.append(child)
+        elif t == "SECTION":
+            frames.extend(s for s in child.get("children", []) if s.get("type") == "FRAME")
+
+    def pos(f):
+        bb = f.get("absoluteBoundingBox") or {}
+        # bucket y (tolleranza 50px) così frame quasi-allineati restano ordinati sx→dx
+        return (round((bb.get("y") or 0) / 50.0), bb.get("x") or 0)
+
+    frames.sort(key=pos)
+    out = [
+        {"idx": f"{i + 1:02d}", "node": normalize_node_id(f["id"]), "name": f.get("name", "")}
+        for i, f in enumerate(frames)
+    ]
+    return file_name, out
+
+
 def build_units(args):
     """Ritorna una lista di dict {idx, node} dall'input --units (canonico) o --nodes (debug)."""
     if args.units:
@@ -123,35 +166,65 @@ def main():
     ap = argparse.ArgumentParser(description="Render Figma frames to PNG (deterministic).")
     ap.add_argument("--file-key", required=True)
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--units", help="path to units.json (canonical)")
+    g.add_argument("--units", help="path to units.json (canonical run input)")
     g.add_argument("--nodes", help="comma-separated node ids (debug only)")
-    ap.add_argument("--out", required=True, help="output dir (design/ is written under it)")
+    g.add_argument("--discover-page", help="page node id: enumerate + render every SCREEN frame on it (no hand node-ids)")
+    g.add_argument("--list-pages", action="store_true", help="print the file's pages (id<TAB>name) and exit")
+    ap.add_argument("--out", required=True, help="output dir (design/ is written under it; for --list-pages used only to find .env)")
     ap.add_argument("--scale", default="1")
     args = ap.parse_args()
 
+    key = args.file_key
     token = load_token(args.out)
     if not token:
         fail(3, f"{ENV_KEY} not set (env or {args.out}/.env)")
 
-    units = build_units(args)
-    ids = [u["node"] for u in units]
-    key = args.file_key
+    # --list-pages: stampa le pagine ed esce (il preflight le filtra per epica/PIN per nome).
+    if args.list_pages:
+        try:
+            for pid, name in get_pages(key, token):
+                print(f"{pid}\t{name}")
+        except urllib.error.HTTPError as e:
+            fail(http_to_exit(e), f"figma /files failed (HTTP {e.code}) — file or token issue")
+        except (urllib.error.URLError, ValueError) as e:
+            fail(2, f"figma /files failed: {e}")
+        sys.exit(0)
 
-    # Nomi dei nodi (best-effort) + esistenza file: una sola chiamata /nodes.
+    # Risolvi le unit da renderizzare (+ nomi già noti) secondo la modalità.
     names = {}
     file_name = key
-    try:
-        q = urllib.parse.urlencode({"ids": ",".join(ids), "depth": "0"})
-        nodes_resp = api_get(f"/files/{key}/nodes?{q}", token)
-        file_name = nodes_resp.get("name") or key
-        for nid, wrap in (nodes_resp.get("nodes") or {}).items():
-            doc = (wrap or {}).get("document") or {}
-            if doc.get("name"):
-                names[nid] = doc["name"]
-    except urllib.error.HTTPError as e:
-        fail(http_to_exit(e), f"figma /nodes failed (HTTP {e.code}) — file or token issue")
-    except (urllib.error.URLError, ValueError) as e:
-        fail(2, f"figma /nodes failed: {e}")
+    if args.discover_page:
+        try:
+            file_name, disc = discover_frames(key, normalize_node_id(args.discover_page), token)
+        except urllib.error.HTTPError as e:
+            fail(http_to_exit(e), f"figma /nodes failed (HTTP {e.code}) — page or token issue")
+        except (urllib.error.URLError, ValueError) as e:
+            fail(2, f"figma /nodes failed: {e}")
+        if not disc:
+            fail(2, f"no SCREEN frames found on page {args.discover_page}")
+        units = [{"idx": u["idx"], "node": u["node"]} for u in disc]
+        names = {u["node"]: u["name"] for u in disc}
+        os.makedirs(args.out, exist_ok=True)
+        with open(os.path.join(args.out, "discovered.json"), "w", encoding="utf-8") as fh:
+            json.dump(disc, fh, ensure_ascii=False, indent=2)
+        log(f"discovered {len(disc)} frames on page {args.discover_page} -> {args.out}/discovered.json")
+    else:
+        units = build_units(args)
+        # Nomi dei nodi (best-effort) + esistenza file: una sola chiamata /nodes.
+        try:
+            q = urllib.parse.urlencode({"ids": ",".join(u["node"] for u in units), "depth": "0"})
+            nodes_resp = api_get(f"/files/{key}/nodes?{q}", token)
+            file_name = nodes_resp.get("name") or key
+            for nid, wrap in (nodes_resp.get("nodes") or {}).items():
+                doc = (wrap or {}).get("document") or {}
+                if doc.get("name"):
+                    names[nid] = doc["name"]
+        except urllib.error.HTTPError as e:
+            fail(http_to_exit(e), f"figma /nodes failed (HTTP {e.code}) — file or token issue")
+        except (urllib.error.URLError, ValueError) as e:
+            fail(2, f"figma /nodes failed: {e}")
+
+    ids = [u["node"] for u in units]
 
     # Render: una sola chiamata /images per tutti gli id.
     try:

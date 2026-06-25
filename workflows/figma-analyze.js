@@ -144,8 +144,10 @@ const FE_ANALYSIS_SCHEMA = {
     designShot: { type: 'string', description: 'path of the design/<idx>.png compared' },
     appShot: { type: 'string', description: 'path of app-shots/<idx>.png compared, or "" if none' },
     codeRefs: { type: 'string', description: 'code references path:line (relative to the pinned HEAD)' },
-    renderedShot: { type: 'boolean', description: 'true if a rendered app PNG was available and used' },
-    dataInsufficient: { type: 'boolean', description: 'true if a state/element could not be visually verified due to thin DEV data' },
+    renderedShot: { type: 'boolean', description: 'true if a rendered app PNG was available AND depicts the same screen as the design (i.e. it was actually used in the comparison)' },
+    appShotMismatch: { type: 'boolean', description: 'true if an app-shot exists but depicts a DIFFERENT screen than the design (e.g. a creation wizard step vs a read-only detail tab) — the unit recipe is mis-specified; the app-shot was discarded' },
+    appShotMismatchReason: { type: 'string', description: 'if appShotMismatch: what the app-shot actually shows vs what the design shows' },
+    dataInsufficient: { type: 'boolean', description: 'true if a state/element could not be visually verified due to thin DEV data (NOT the same as appShotMismatch — that is a wrong-screen capture)' },
     dataInsufficientReason: { type: 'string' },
     findingPath: { type: 'string' },
     note: { type: 'string' },
@@ -269,13 +271,14 @@ ${u.prose ?? u.prosa ?? '(prose not provided)'}
 
 PROCEDURE
 1. READ THE DESIGN: Read ${base}/design/${u.idx}.png (the runtime renders the image). This is the source of truth for the intended UI.
-2. READ THE RENDERED APP if present: Read ${base}/app-shots/${u.idx}.png — if it is absent or app-shots-index.md flags it (EMPTY/auth/skip), proceed on design + code only and set renderedShot=false.
+2. READ THE RENDERED APP if present: Read ${base}/app-shots/${u.idx}.png — if it is absent or app-shots-index.md flags it (EMPTY/auth/skip/UNVERIFIED/WRONG-SCREEN), proceed on design + code only and set renderedShot=false.
+2b. SAME-SCREEN GATE (do this BEFORE comparing): if an app-shot is present, confirm it depicts the SAME screen as the design — same UI surface, not merely a shared title. A creation/edit WIZARD step (stepper + form inputs, often empty) is NOT the same screen as a read-only DETAIL tab (populated table), even when the section title matches. A shared header/route prefix is NOT enough. If they differ, set appShotMismatch=true with appShotMismatchReason (what the app-shot actually shows vs the design), set renderedShot=false, DISCARD the app-shot, and compare design↔code only. A wrong-screen capture is NOT dataInsufficient — keep the two flags distinct.
 3. LOCATE THE CODE: from ${base}/repo-map/index.md + the PR->paths index in ${base}/comments.md, find the components/pages/i18n that implement this screen; Read them on the LOCAL tree at ${fePath}.
-4. COMPARE per visual dimension (layout, tokens, typography, components, states, copy, spacing): is each present/faithful in the code (and in the rendered app, if available)? Note where the app/code is MORE explicit than the design, or diverges.
+4. COMPARE per visual dimension (layout, tokens, typography, components, states, copy, spacing): is each present/faithful in the code (and in the rendered app ONLY if it passed the same-screen gate)? Note where the app/code is MORE explicit than the design, or diverges.
 5. If a state/element can't be visually confirmed because the rendered app lacked data, set dataInsufficient=true with a reason.
 
-OUTPUT: ${base}/findings/${u.idx}-<slug>.md with: stato (enum), per-dimension table (dimension | gap enum | note), figma node, route, designShot/appShot paths, codeRefs (path:line), data-insufficiency note. Italian prose.
-Return the structured object (idx, titolo, stato, dimensions, figmaNode, route, designShot, appShot, codeRefs, renderedShot, dataInsufficient, dataInsufficientReason, findingPath, note).`
+OUTPUT: ${base}/findings/${u.idx}-<slug>.md with: stato (enum), per-dimension table (dimension | gap enum | note), figma node, route, designShot/appShot paths, codeRefs (path:line), data-insufficiency note, and — if applicable — an APP-SHOT MISMATCH note (the captured app-shot is a different screen; recipe to fix). Italian prose.
+Return the structured object (idx, titolo, stato, dimensions, figmaNode, route, designShot, appShot, codeRefs, renderedShot, appShotMismatch, appShotMismatchReason, dataInsufficient, dataInsufficientReason, findingPath, note).`
 
 const verifierPrompt = (idx, titolo, findingPath) => `${COMMON}
 
@@ -322,12 +325,12 @@ ROLE: ORCHESTRATOR - REPORT. Write ${base}/report.md in ITALIAN (markdown). Read
 
 MANDATORY STRUCTURE (headings + prose in Italian)
 1. OVERVIEW: per-screen table — | idx | schermata | stato | rendered? | note | (use the summarized results, verify against findings/).
-2. DESIGN -> CODE: per screen, the per-dimension gaps (layout/tokens/typography/components/states/copy/spacing), with code references (path:line) and the design/app screenshot paths (embed thumbnails where useful).
+2. DESIGN -> CODE: per screen, the per-dimension gaps (layout/tokens/typography/components/states/copy/spacing), with code references (path:line) and the design screenshot path. Embed the app-shot ALONGSIDE the design ONLY when the finding has renderedShot=true (it passed the same-screen gate). If the finding has appShotMismatch=true, do NOT show the app-shot next to the design as if it were the same screen — show the design only and add one line: the captured app-shot depicts a DIFFERENT screen (state the mismatch reason), so the unit recipe is mis-specified and the comparison is design-vs-code only.
 3. CODE -> DESIGN: synthesis of reverse-diff.md.
 4. VERIFICATION: which screens the verifier CONFIRMED vs REVISED / still contested (residual objections).
 5. EVIDENCE & LIMITS:
    - As-is: the pinned HEAD sha + whether the tree was dirty (from repo-map/index.md).
-   - Rendered capture: which screens had an app-shot vs design-only; list EMPTY/auth/skip flags from app-shots-index.md (e.g. an expired REACT_APP_MOCK_TOKEN), and every DATA-INSUFFICIENCY note — these are NOT coverage gaps, state them as such.
+   - Rendered capture: which screens had a USABLE app-shot (renderedShot=true) vs design-only; list EMPTY/auth/skip/UNVERIFIED/WRONG-SCREEN flags from app-shots-index.md (e.g. an expired REACT_APP_MOCK_TOKEN), every APP-SHOT MISMATCH (captured a different screen — recipe mis-specified), and every DATA-INSUFFICIENCY note — these are NOT coverage gaps, state them as such. If NO unit had a usable app-shot, say so plainly: the rendered-capture leg added no visual verification this run — the recipes/units need revising.
    - TOKEN CAP: ${budgetInfo} — report verbatim; if anything was skipped for budget, list it (no silent truncation).
    - PER-ROLE MODEL MIX: ${modelMix}.
 
@@ -417,6 +420,15 @@ if (okResults.length === 0) {
 }
 const verdicts = okResults.map((e) => ({ idx: e.idx, verifierOutcome: e.verifierOutcome, reviewPath: e.reviewPath }))
 log(`analysis + verification done: ${okResults.length} unit rows`)
+
+// Rendered-capture health: a unit-recipe whose app-shot is a different screen (appShotMismatch) or thin-data
+// adds no visual verification. If renderedCapture was on yet NO unit got a usable app-shot, say it out loud.
+const usableAppShots = okResults.filter((e) => e.renderedShot === true).length
+const mismatchedIdx = okResults.filter((e) => e.appShotMismatch === true).map((e) => e.idx)
+if (mismatchedIdx.length) log(`APP-SHOT MISMATCH (wrong screen, recipe mis-specified): ${mismatchedIdx.join(', ')} — these app-shots were discarded, comparison is design-vs-code.`)
+if (renderedCapture && !(appRes && appRes.skipped) && usableAppShots === 0) {
+  log('WARNING: rendered-capture leg produced NO usable app-shot (all mismatch/empty/data-insufficient) — design-vs-code only this run; revise the unit recipes (route+steps+waitFor must reach the SAME screen as the figma node).')
+}
 
 // Reverse diff (after verification).
 phase('Reverse diff')

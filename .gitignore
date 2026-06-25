@@ -9,3 +9,9 @@
 
 # Node / Playwright (FE analysis)
 node_modules/
+
+# OS / Python junk
+.DS_Store
+**/.DS_Store
+__pycache__/
+**/__pycache__/

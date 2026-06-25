@@ -11,7 +11,14 @@
 // Recipe per-unit (campi letti da ogni unit di units.json; le unit senza `route` sono saltate):
 //   { idx, route, waitFor?: "<css>"|"networkidle", viewport?: "WxH", steps?: [{click:{role,name}}|{click:"<text>"}], settle?: <ms> }
 //
+// `waitFor` (selettore CSS/text, non 'networkidle') = ASSERZIONE dello stato target. I click attendono già il
+// proprio locator, quindi l'asserzione viene verificata DOPO gli steps: deve puntare a un elemento UNIVOCO della
+// schermata finale (non a un titolo/route condiviso con schermate diverse). Senza `waitFor` lo status è UNVERIFIED:
+// lo screenshot è salvato ma non possiamo garantire di aver raggiunto lo schermo giusto.
+//
 // Output: <out>/app-shots/<idx>.png + <out>/app-shots-index.md (idx | route | file | status)
+// Status: ok (target asserito) · UNVERIFIED (nessun waitFor) · WRONG-SCREEN? (waitFor/steps non trovati) ·
+//   UNREACHABLE / NAV-TIMEOUT / LOGIN-REDIRECT / EMPTY (vedi sotto).
 // Exit 0 sempre (i fallimenti per-unit sono flaggati, mai fatali per il batch).
 
 import { chromium } from 'playwright'
@@ -89,10 +96,10 @@ for (const u of units) {
     continue
   }
 
+  // `waitFor` (a CSS/text selector, not 'networkidle') asserts the TARGET state. Clicks auto-wait on their
+  // locator, so the assertion is most meaningful AFTER the steps: it confirms we reached the intended screen.
+  const targetSelector = u.waitFor && u.waitFor !== 'networkidle' ? u.waitFor : null
   try {
-    if (u.waitFor && u.waitFor !== 'networkidle') {
-      await page.waitForSelector(u.waitFor, { timeout: 15000 })
-    }
     for (const s of u.steps || []) {
       const loc =
         s.click && typeof s.click === 'object'
@@ -100,12 +107,19 @@ for (const u of units) {
           : page.getByText(new RegExp(String(s.click), 'i'))
       await loc.first().click({ timeout: 15000 })
     }
+    if (targetSelector) {
+      await page.waitForSelector(targetSelector, { timeout: 15000 })
+    }
     await page.waitForTimeout(Number(u.settle ?? 2500))
     await page.screenshot({ path: path.join(out, 'app-shots', `${idx}.png`), fullPage: true })
+    // The screenshot is saved; 'ok' means the TARGET STATE was asserted. Without a target selector we cannot
+    // tell whether the right screen was reached (a shared title/route is not enough), so flag it UNVERIFIED.
+    status = targetSelector ? 'ok' : 'UNVERIFIED (no waitFor — target screen not asserted)'
   } catch (e) {
     const m = String(e)
-    status = /waitForSelector|getByRole|getByText|click/i.test(m)
-      ? `STEP-FAILED (${(u.waitFor || 'step')})`
+    // A failed target assertion after steps usually means we landed on the WRONG screen, not just a flaky step.
+    status = /waitForSelector|getByRole|getByText|click|Timeout/i.test(m)
+      ? `WRONG-SCREEN? (${targetSelector || 'step'} not found)`
       : `FAILED: ${m.slice(0, 80)}`
     file = '—'
   }
