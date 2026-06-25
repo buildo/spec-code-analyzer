@@ -1,0 +1,20 @@
+# Secrets — never commit
+.env
+**/.env
+
+# Analysis output dirs (artifacts, may contain .env)
+.spec-analyze/
+.spec-analyze-goals/
+.spec-analyze-fe/
+
+# Local manual-design screenshots (workflow input, not source)
+screens/
+
+# Node / Playwright (FE analysis)
+node_modules/
+
+# OS / Python junk
+.DS_Store
+**/.DS_Store
+__pycache__/
+**/__pycache__/
