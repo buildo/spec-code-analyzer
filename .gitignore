@@ -1,0 +1,14 @@
+# spec-code-analyzer secrets & outputs — never commit
+.env
+.env.*
+!.env.example
+
+# workflow output dirs
+output/
+output-goals/
+.spec-analyze*
+
+# misc
+.DS_Store
+node_modules/
+workflows/__pycache__/

@@ -30,8 +30,30 @@ pipeline, whether produced by discovery or materialized from the cache.
 |---|---|---|
 | `useIndex` | `true` | set `false` to bypass the MCP entirely (flow is then exactly the original) |
 | `workspace` | `repo` | tenant scope; **sanitized** to `[a-z0-9-]` (the MCP rejects slashes), e.g. `pagopa/interop-be-monorepo` → `pagopa-interop-be-monorepo` |
+| `outputDir` | `./output` | where output lands; the preflight passes `SPEC_OUTPUT_DIR` (absolute → always this repo) |
 
 If the MCP is unreachable the workflow degrades to the original discovery flow — no regressions.
+
+## Config & preflight (`.env` + `check_mcp.py`)
+
+The MCP url/key are **never hardcoded** in the workflow — the single source of truth is the root
+`.env` (gitignored; see `.env.example`):
+
+```
+MCP_URL=…      MCP_API_KEY=…      SPEC_OUTPUT_DIR=…      ATLASSIAN_*=…
+```
+
+`workflows/check_mcp.py` (stdlib) is the preflight step:
+- **`.env` missing** → creates the template + ensures `.gitignore`, **exits 2** (fill it and re-run).
+- **`MCP_*` incomplete** → exits 2.
+- **otherwise** → idempotently **(re)registers** the `vibingwithclaude` Claude MCP server *from `.env`*
+  (so changing the url/key in `.env` propagates to the agents, which reach the server by name), then
+  **pings** it (JSON-RPC `initialize`). Reachable → exit 0; unreachable/unauthorized → **warning**,
+  exit 0 (the workflow degrades to no-cache via `useIndex`, so a down MCP never aborts an analysis).
+- prints the resolved absolute `SPEC_OUTPUT_DIR` on stdout for the launcher to pass as `args.outputDir`.
+
+The workflow JS body cannot read `.env`/env, so `outputDir` (and the useIndex/workspace knobs) arrive
+via `args`; the preflight is what reads `.env` and wires them in.
 
 ## Node / workspace contract
 

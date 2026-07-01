@@ -53,7 +53,10 @@ const branch = A.branch || 'main'
 const VARIANT = (A.variant === 'goals') ? 'goals' : 'prescriptive'
 // Default output-dir is variant-aware so the two arms NEVER mix artifacts (compartmentalization,
 // like the original two plugins). The driver may still override outputDir explicitly.
-const outputDir = A.outputDir || (VARIANT === 'goals' ? './.spec-analyze-goals' : './.spec-analyze')
+// The launcher/preflight resolves SPEC_OUTPUT_DIR (from the root .env, see workflows/check_mcp.py)
+// and passes it as args.outputDir — pass an ABSOLUTE path there so output always lands in this repo
+// regardless of the launch cwd. This is only the fallback default when args.outputDir is absent.
+const outputDir = A.outputDir || (VARIANT === 'goals' ? './output-goals' : './output')
 const slug = A.slug
 const srsPath = A.srsPath || `${outputDir}/${slug}/srs.md`
 const cardsPath = A.cardsPath || null
