@@ -41,21 +41,25 @@ Le due varianti scrivono in directory separate (`./.spec-analyze` vs `./.spec-an
 ## Componenti
 
 - **`workflows/spec-analyze.js`** — il workflow di orchestrazione (descritto sopra).
-- **`workflows/fetch_atlassian.py`** — fetch deterministico di Confluence/Jira (solo stdlib Python 3, nessuna dipendenza). Produce `srs.md` (+ eventuale `cards.md`). Credenziali da env o `<out>/.env`, mai stampate.
+- **`workflows/fetch_atlassian.py`** — fetch deterministico di Confluence/Jira (solo stdlib Python 3, nessuna dipendenza). Produce `srs.md` (+ eventuale `cards.md`). Credenziali da env o `.env`, mai stampate.
+- **`workflows/check_mcp.py`** — preflight della cache MCP (solo stdlib): legge `MCP_URL`/`MCP_API_KEY` dal `.env` di root (mai hardcodati nel workflow), (ri)registra il server MCP da `.env` e ne verifica la raggiungibilità. Config mancante → crea il template `.env` e si ferma; MCP irraggiungibile → warning (il workflow degrada a no-cache). Vedi `workflows/MCP-CACHE.md`.
 - **`workflows/run_cost.py`** — post-processing del costo reale per-agent/per-fase, ricostruito dai transcript JSONL della run (il workflow internamente vede solo il totale output-token; questo script recupera input + cache per il breakdown della RR-5).
 
 ## Come si usa
 
 Il workflow **non** esegue da solo il fetch né la conferma utente: presuppone un preflight interattivo. Flusso tipico:
 
-**1. Preflight** — verifica credenziali Atlassian e `gh` autenticato:
+Tutta la configurazione vive in un **unico `.env` a root** (gitignored): `ATLASSIAN_*`, `MCP_URL`, `MCP_API_KEY`, `SPEC_OUTPUT_DIR`. Se manca, `check_mcp.py` lo crea come template e si ferma; caricalo nell'ambiente con `set -a; . ./.env; set +a` così le variabili valgono per tutti gli script del preflight.
+
+**1. Preflight** — config `.env`, cache MCP, credenziali Atlassian, `gh`:
 
 ```bash
-export ATLASSIAN_BASE_URL="https://<org>.atlassian.net"
-export ATLASSIAN_EMAIL="tu@example.com"
-export ATLASSIAN_API_TOKEN="..."        # oppure in <out>/.env (gitignored)
+python3 workflows/check_mcp.py        # crea/valida .env, (ri)registra e pinga l'MCP; stampa SPEC_OUTPUT_DIR
+set -a; . ./.env; set +a              # carica ATLASSIAN_*, MCP_*, SPEC_OUTPUT_DIR nell'ambiente
 gh auth status
 ```
+
+`check_mcp.py` esce con **2** (bloccante) se il `.env` manca o `MCP_*` è incompleto; con **0** anche se l'MCP è irraggiungibile (warning: il workflow degrada a no-cache via `useIndex`). L'`MCP_URL` non è mai hardcodato: cambialo nel `.env` e il preflight ri-registra il server.
 
 **2. Fetch della specifica** da Confluence (+ eventuale card Jira):
 
@@ -63,12 +67,12 @@ gh auth status
 python3 workflows/fetch_atlassian.py \
   --confluence <id|url> \
   --jira <KEY|url> \
-  --out ./.spec-analyze/<slug>
+  --out "$SPEC_OUTPUT_DIR/<slug>"
 ```
 
 **3. Segmentazione** dell'SRS in **≤10 unità** (sezioni), confermata con l'utente.
 
-**4. Lancio del workflow** (dal main-loop di Claude Code) passando gli `args`:
+**4. Lancio del workflow** (dal main-loop di Claude Code) passando gli `args` (`outputDir` = `SPEC_OUTPUT_DIR`, assoluto → output sempre in questo repo):
 
 ```jsonc
 {
@@ -76,8 +80,11 @@ python3 workflows/fetch_atlassian.py \
   "repo": "owner/repo",
   "branch": "develop",
   "slug": "draft-srs-...",
-  "srsPath": "./.spec-analyze/<slug>/srs.md",
-  "cardsPath": "./.spec-analyze/<slug>/cards.md",  // o null
+  "outputDir": "<SPEC_OUTPUT_DIR>",     // da check_mcp.py; assoluto consigliato
+  "workspace": "owner/repo",            // opzionale; sanificato a [a-z0-9-] per l'MCP
+  "useIndex": true,                     // false = bypassa la cache MCP
+  "srsPath": "<SPEC_OUTPUT_DIR>/<slug>/srs.md",
+  "cardsPath": "<SPEC_OUTPUT_DIR>/<slug>/cards.md",  // o null
   "units": [ { "idx": "01", "titolo": "...", "prose": "..." } ],
   "mergeNote": "eventuali merge di sezioni eseguiti"  // o null
 }
