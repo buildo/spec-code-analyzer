@@ -198,9 +198,10 @@ def main():
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(payload)
-        # brief summary to stderr for the calling agent's log
-        cb, wb = result["bundles"]
-        sys.stderr.write(f"wrote {args.out}: {len(cb['nodes'])} area nodes, {len(wb['nodes'])} crawler nodes\n")
+        # brief summary to stderr for the calling agent's log. Robust to 0/1/2 bundles:
+        # empty bundles are omitted upstream, so result["bundles"] may have fewer than two.
+        counts = ", ".join(f"{b['source_kind']}={len(b['nodes'])}" for b in result["bundles"])
+        sys.stderr.write(f"wrote {args.out}: {counts or 'no bundles (empty discovery)'}\n")
     else:
         print(payload)
 

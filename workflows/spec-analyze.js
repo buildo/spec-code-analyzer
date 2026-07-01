@@ -72,7 +72,9 @@ const useIndex = A.useIndex !== false // default ON; set args.useIndex=false to 
 // The MCP validates `workspace` to [a-z0-9-] (lowercased) and REJECTS slashes, so owner/repo
 // must be sanitized (e.g. pagopa/interop-be-monorepo -> pagopa-interop-be-monorepo).
 const sanitizeWorkspace = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
-const workspace = sanitizeWorkspace(A.workspace || repo)
+// Fall back to the (always-present) repo if a caller passes a workspace that sanitizes to empty
+// (e.g. only punctuation), so we never send an empty workspace to the MCP.
+const workspace = sanitizeWorkspace(A.workspace || repo) || sanitizeWorkspace(repo)
 
 if (!repo || !slug || units.length === 0) {
   throw new Error('Missing args: repo, slug and a non-empty units[] are required. Run the interactive driver first (preflight + fetch + confirmation + segmentation).')
@@ -576,7 +578,7 @@ PROCEDURE
 4a. If MISS: write NOTHING; call report_miss(query="${repo} ${unitTitles}", notes="no fresh indexed bundle") for telemetry; return { status:"miss", materialized:false, headSha, indexedSha:"<or empty>", notes }.
 4b. If FRESH: MATERIALIZE (mkdir -p "${outputDir}/repo-map" first), then SELF-VERIFY, then return:
     - ${outputDir}/repo-map/<area_name>.md  <- each area card's body_md (verbatim).
-    - ${outputDir}/repo-map/index.md        <- a "| area | node | purpose |" table built from the area cards (node = <area_name>.md), so it matches the cartographer contract the analyzers read.
+    - ${outputDir}/repo-map/index.md        <- a "| area | node | purpose |" table built from the area cards (area = card.name, node = <card.name>.md, purpose = card.summary), so it matches the cartographer contract the analyzers read.
     - ${base}/comments.md                   <- the body_md of the card named "comments-md" (verbatim).
     SELF-VERIFY before returning fresh: run  wc -c "${outputDir}/repo-map/index.md" "${base}/comments.md"  and  ls "${outputDir}/repo-map"/*.md  — every target MUST exist and be NON-empty and there must be one <area>.md per area card. The JS body cannot check the filesystem, so YOU are the only guard: if the comments-md card lacks body_md, OR any target is missing/empty, OR the mkdir/writes failed, return { status:"miss", materialized:false, ... } so a full discovery runs. Return { status:"fresh", materialized:true, ... } ONLY when the self-verify passes for ALL targets.
 INVARIANTS: as-is truth wins over cache; write only under ${outputDir}/repo-map/ and ${base}/; no secrets. Return the structured object.`
