@@ -3,7 +3,9 @@ export const meta = {
   description: 'Spec-vs-code as a dynamic workflow, A/B-parameterized by args.variant ("prescriptive" default | "goals"): context in parallel, fan-out of N analyzers from the SRS sections, adversarial verification + bounded rework in a pipeline, reverse diff, report. The orchestration skeleton is IDENTICAL across variants — only the two experimental axes differ (axis a = spec style: step-by-step PROCEDURE vs Objective/Contract/Guardrail; axis b = discovery freedom: fixed numeric caps vs budget+judgment).',
   whenToUse: 'After the interactive preflight (credentials + gh check, fetch_atlassian.py, RF-FLOW-2 confirmation and SRS segmentation into <=10 units). Inputs are passed via args (set args.variant to pick the A/B arm). It does NOT run the fetch nor the user confirmation itself. For an A/B comparison, run both variants on the SAME repo/branch/units, into SEPARATE output dirs.',
   phases: [
-    { title: 'Context', detail: 'cartographer || crawler (parallel, independent)', model: 'haiku' },
+    { title: 'Context lookup', detail: 'MCP cache read: reuse indexed repo-map/+comments.md if FRESH (commit_sha==HEAD), else miss (skipped when useIndex=false)', model: 'haiku' },
+    { title: 'Context', detail: 'cartographer || crawler (parallel, independent) — skipped on a fresh cache hit', model: 'haiku' },
+    { title: 'Index write-back', detail: 'MCP cache populate: ingest cartographer/crawler output after a real discovery (non-blocking)', model: 'haiku' },
     { title: 'Analysis', detail: 'fan-out: one analyzer per SRS unit', model: 'opus' },
     { title: 'Verification', detail: 'verifier (opus) per finding + bounded rework (opus, <=1 round)', model: 'opus' },
     { title: 'Reverse diff', detail: 'reverse-scout over the definitive findings', model: 'sonnet' },
@@ -57,6 +59,20 @@ const srsPath = A.srsPath || `${outputDir}/${slug}/srs.md`
 const cardsPath = A.cardsPath || null
 const units = Array.isArray(A.units) ? A.units : []
 const mergeNote = A.mergeNote || null
+
+// ---------------------------------------------------------------------------
+// MCP knowledge-graph cache (vibingwithclaude) — added on top of the original spec.
+// The workflow can (1) look up indexed context BEFORE discovery and reuse it when it is
+// FRESH (repo-level: the indexed cartographer/crawler bundle's commit_sha == current HEAD),
+// and (2) populate the index AFTER a real discovery. All MCP I/O happens inside agents
+// (the Workflow JS body cannot call MCP tools directly); this is best-effort and NEVER
+// blocks the analysis — if the MCP is down or useIndex=false, the flow is exactly the
+// original one. FASE 1 is repo-level fresh/miss only (no per-area staleness/merge yet).
+const useIndex = A.useIndex !== false // default ON; set args.useIndex=false to bypass the MCP entirely
+// The MCP validates `workspace` to [a-z0-9-] (lowercased) and REJECTS slashes, so owner/repo
+// must be sanitized (e.g. pagopa/interop-be-monorepo -> pagopa-interop-be-monorepo).
+const sanitizeWorkspace = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
+const workspace = sanitizeWorkspace(A.workspace || repo)
 
 if (!repo || !slug || units.length === 0) {
   throw new Error('Missing args: repo, slug and a non-empty units[] are required. Run the interactive driver first (preflight + fetch + confirmation + segmentation).')
@@ -116,6 +132,8 @@ const TAIL_RESERVE = REPORT_RESERVE + EDITOR_RESERVE // editor (parallel) + repo
 // run — this is surfaced in RR-5.
 // ---------------------------------------------------------------------------
 const MODELS = {
+  contextBroker: 'haiku', // MCP cache lookup (read) + fresh-materialization — cheap/mechanical
+  indexer: 'haiku',       // MCP write-back (populate) after a real discovery — cheap/mechanical
   cartographer: 'haiku',
   crawler: 'haiku',
   analyzer: 'opus',
@@ -311,6 +329,22 @@ const REPORT_SCHEMA = {
 }
 
 // ---------------------------------------------------------------------------
+// M4 — machine-readable sidecars for the MCP indexer (deterministic parsing by
+// workflows/repo_map_to_bundle.py). Shared by BOTH variants so they never drift.
+// The sidecars DUPLICATE the human index (index.md table / comments.md head index)
+// in a stable JSON shape; the prose artifacts stay the contract toward the analyzers.
+// ---------------------------------------------------------------------------
+const CARTO_SIDECAR = `
+MACHINE-READABLE SIDECAR (ALSO write, for the MCP indexer): ${outputDir}/repo-map/index.json
+{ "areas": [ { "area_key": "<EXACTLY the <area>.md filename stem, no extension>", "purpose": "<one line>", "paths": ["<key path>", ...], "dependsOn": ["<area_key>", ...] } ] }
+area_key MUST equal the <area>.md filename stem so the JSON and the node file can be joined. Include EVERY area; no file content.`.trim()
+
+const CRAWLER_SIDECAR = `
+MACHINE-READABLE SIDECAR (ALSO write, for the MCP indexer): ${base}/comments.index.json
+{ "prs": [ { "number": <int>, "title": "<str>", "state": "<str>", "signals": "<S1..S4 or free>", "paths": ["<touched path>", ...] } ] }
+List ONLY the enriched (kept) PRs, mirroring the head index table of comments.md; discarded PRs are excluded.`.trim()
+
+// ---------------------------------------------------------------------------
 // Role prompts (inlined, faithful to the prescriptive variant's agents/*.md)
 // ---------------------------------------------------------------------------
 const cartographerPrompt = `${COMMON}
@@ -326,6 +360,7 @@ PROCEDURE
 4. Write ${outputDir}/repo-map/index.md as the first consultable thing: a | area | node | purpose | table listing every node.
 
 OUTPUT: write ONLY inside ${outputDir}/repo-map/. No file content, compact nodes, as-is ${branch}, no secrets.
+${CARTO_SIDECAR}
 Return a short text summary (number of areas, index path).`
 
 const crawlerPrompt = `${COMMON}
@@ -344,6 +379,7 @@ PROCEDURE
 4. LIMIT: at most ~30 enriched PRs; beyond that keep the most relevant ones and FLAG the cut.
 
 OUTPUT: ${base}/comments.md. At the HEAD the PR->path index: | PR | Title | State | Signals | Touched paths |. Then one section per PR with the selected comments (author, file:line, text). At the tail the discarded PRs with reason.
+${CRAWLER_SIDECAR}
 Discovery does NOT stop at Jira links; open PRs = context; no secrets.
 Return a short summary (candidate PRs, enriched, discarded, any cut).`
 
@@ -433,6 +469,7 @@ TOOLS: Bash, Read, Write only.
 
 OBJECTIVE: produce enough as-is orientation of the repo that the other roles can locate code without re-reading everything. Orientation only - do NOT read file contents.
 OUTPUT CONTRACT: a segmented repo-map/ under ${outputDir}/repo-map/ - index.md FIRST (a | area | node | purpose | table, the first consultable thing) plus one compact <area>.md node per coherent area (purpose, key paths WITHOUT content, optional dependsOn). Write ONLY inside ${outputDir}/repo-map/.
+${CARTO_SIDECAR}
 GUARDRAILS/INVARIANTS: no file content; compact nodes; repo-scoped & reusable; as-is truth of ${branch}; no secrets; minimal tools. HOW you build it (which gh calls, how you group the areas, aim ~5-15 nodes) is YOUR judgment.
 Return a short text summary (number of areas, index path).`
 
@@ -443,6 +480,7 @@ TOOLS: Bash, Read, Write only.
 
 OBJECTIVE: a pre-localization overview of the PRs and comments relevant to this feature/domain.
 OUTPUT CONTRACT: ${base}/comments.md with, at the HEAD, an index that makes the comments consultable BY PATH (at least: | PR | Title | State | Signals | Touched paths |) and, below, the selected comments per PR (author, file:line, text); the discarded PRs listed at the tail with a one-line reason.
+${CRAWLER_SIDECAR}
 GUARDRAILS/INVARIANTS: discovery does NOT stop at Jira links - draw on AT LEAST Jira remote links, issue keys, feature terms from ${srsPath}, OPEN PRs against ${branch}, AND any other useful signal, by judgment (the concrete queries/commands are YOURS to choose); dedupe (same author+text) and filter noise (bots, LGTM, CI); OPEN PRs = context, NOT coverage. COST BUDGET, NO FIXED NUMERIC CEILING: keep the number of enriched PRs reasonable, prioritize by relevance, and FLAG every cut - never a silent truncation. Judgment decides how many PRs deserve enrichment. No secrets.
 Return a short summary (candidate PRs, enriched, discarded, any flagged cut).`
 
@@ -502,6 +540,70 @@ Return a short summary (number of entries).`
 const P = (VARIANT === 'goals')
   ? { cartographer: cartographerPromptGoals, crawler: crawlerPromptGoals, analyzer: analyzerPromptGoals, verifier: verifierPromptGoals, rework: reworkPromptGoals, reverseScout: reverseScoutPromptGoals }
   : { cartographer: cartographerPrompt, crawler: crawlerPrompt, analyzer: analyzerPrompt, verifier: verifierPrompt, rework: reworkPrompt, reverseScout: reverseScoutPrompt }
+
+// ---------------------------------------------------------------------------
+// MCP cache roles (variant-agnostic): context-broker (read+materialize) and indexer
+// (populate). Both reach the vibingwithclaude MCP via ToolSearch — MCP tools cannot be
+// called from the Workflow JS body, only from inside an agent. Verified reachable by spike S0.
+// ---------------------------------------------------------------------------
+const CONTEXT_LOOKUP_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['status', 'materialized'],
+  properties: {
+    status: { type: 'string', enum: ['fresh', 'miss'], description: 'fresh = indexed bundle commit_sha == current HEAD AND artifacts fully materialized; else miss' },
+    materialized: { type: 'boolean', description: 'true only if repo-map/ AND comments.md were fully rewritten from the index' },
+    headSha: { type: 'string' },
+    indexedSha: { type: 'string', description: 'the commit_sha found on the indexed area nodes (empty if none)' },
+    notes: { type: 'string' },
+  },
+}
+
+const unitTitles = units.map((u) => u.titolo ?? u.title).filter(Boolean).join('; ')
+
+// READ: look up the indexed context and, on a FRESH repo-level hit, rebuild repo-map/ + comments.md.
+const contextBrokerPrompt = `${COMMON}
+
+ROLE: CONTEXT-BROKER (MCP cache lookup, FASE 1 repo-level fresh/miss). Run ONCE, BEFORE discovery.
+TOOLS: Bash, Read, Write, AND the "vibingwithclaude" MCP tools — load them first with ToolSearch query "select:mcp__vibingwithclaude__get_context". (These MCP tools are the ONE exception to the no-extra-tools rule for this role.)
+
+OBJECTIVE: decide if the knowledge-graph already holds a FRESH map+comments for this repo and, if so, materialize them on disk so discovery can be skipped. Repo-level only: no per-area merge.
+
+PROCEDURE
+1. HEAD sha: sha=$(gh api "repos/${repo}/commits/${branch}" --jq .sha) (fallback: gh api with -H 'Accept: application/vnd.github+json'). Record it as headSha.
+2. get_context(text="${repo} ${unitTitles}", workspace="${workspace}", limit=50). Inspect the returned cards.
+3. FRESHNESS (repo-level): among the matches, collect cards of type "area" and read card.extra.commit_sha. The index is FRESH iff there is >=1 area card AND their commit_sha equals headSha AND a card named "comments-md" (type pr) with the SAME commit_sha is present (it carries the full comments.md). Otherwise it is a MISS. On ANY doubt, choose MISS (the cache must never override as-is truth).
+4a. If MISS: write NOTHING; call report_miss(query="${repo} ${unitTitles}", notes="no fresh indexed bundle") for telemetry; return { status:"miss", materialized:false, headSha, indexedSha:"<or empty>", notes }.
+4b. If FRESH: MATERIALIZE (mkdir -p "${outputDir}/repo-map" first), then SELF-VERIFY, then return:
+    - ${outputDir}/repo-map/<area_name>.md  <- each area card's body_md (verbatim).
+    - ${outputDir}/repo-map/index.md        <- a "| area | node | purpose |" table built from the area cards (node = <area_name>.md), so it matches the cartographer contract the analyzers read.
+    - ${base}/comments.md                   <- the body_md of the card named "comments-md" (verbatim).
+    SELF-VERIFY before returning fresh: run  wc -c "${outputDir}/repo-map/index.md" "${base}/comments.md"  and  ls "${outputDir}/repo-map"/*.md  — every target MUST exist and be NON-empty and there must be one <area>.md per area card. The JS body cannot check the filesystem, so YOU are the only guard: if the comments-md card lacks body_md, OR any target is missing/empty, OR the mkdir/writes failed, return { status:"miss", materialized:false, ... } so a full discovery runs. Return { status:"fresh", materialized:true, ... } ONLY when the self-verify passes for ALL targets.
+INVARIANTS: as-is truth wins over cache; write only under ${outputDir}/repo-map/ and ${base}/; no secrets. Return the structured object.`
+
+// POPULATE: after a real discovery, ingest the cartographer/crawler artifacts into the graph.
+const indexerPrompt = `${COMMON}
+
+ROLE: INDEXER (MCP cache write-back). Run ONCE, AFTER a real discovery (miss path). Best-effort, NON-blocking.
+TOOLS: Bash (gh, python3), Read, AND the "vibingwithclaude" MCP tools — load them with ToolSearch query "select:mcp__vibingwithclaude__ingest_bundle,mcp__vibingwithclaude__upsert_node,mcp__vibingwithclaude__add_link".
+
+OBJECTIVE: index the just-produced repo-map/ + comments.md into the graph under workspace "${workspace}", tagged with the current HEAD commit_sha, so a later run can reuse it.
+
+PROCEDURE
+1. HEAD sha: sha=$(gh api "repos/${repo}/commits/${branch}" --jq .sha).
+2. Locate the transform script deterministically: root=$(git rev-parse --show-toplevel 2>/dev/null || pwd); script="$root/workflows/repo_map_to_bundle.py"; if [ ! -f "$script" ]; then script=$(find "$root" -name repo_map_to_bundle.py -not -path '*/node_modules/*' | head -1); fi. If still not found, log it and skip write-back (non-fatal).
+3. Build the bundles deterministically:
+   python3 "$script" --repo "${repo}" --branch "${branch}" --commit-sha "$sha" --workspace "${workspace}" \\
+     --repo-map-dir "${outputDir}/repo-map" --comments-index "${base}/comments.index.json" \\
+     --comments-md "${base}/comments.md" --out "${base}/mcp-bundles.json"
+   (If ${base}/comments.index.json is missing because the crawler didn't emit the sidecar, proceed with just the repo-map bundle; note it.)
+4. Read ${base}/mcp-bundles.json. For EACH object in .bundles, call ingest_bundle with its fields (schema_version, bundle_id, source_kind, workspace, commit_sha, branch, replace_edges, nodes).
+5. FALLBACK (ingest_bundle unavailable or schema-rejected): for each node call upsert_node(type,name,title,summary,body_md,keywords,extra,links,workspace="${workspace}"), then add_link for each node.links entry. (upsert_node is proven-good.)
+6. NON-FATAL: if anything fails, log it and return a short summary; NEVER raise. Return a short text summary (bundles sent, nodes ingested, method used, any fallback/skip).
+INVARIANTS: no secrets in nodes; workspace exactly "${workspace}".`
+
+P.contextBroker = contextBrokerPrompt
+P.indexer = indexerPrompt
 
 // Editor: markdown in, markdown out. The improved SRS is a derivative PROPOSAL
 // the user reviews and imports into a NEW Confluence page (Insert > Markup > Markdown).
@@ -661,15 +763,39 @@ As-is truth; enums to the letter; no secrets. Return the structured object (repo
 // ---------------------------------------------------------------------------
 log(`spec-analyze (${VARIANT}) · style=${AXES.style} · ${repo}@${branch} · ${units.length} SRS units · out ${base}`)
 
+// MCP cache lookup (M1, FASE 1) — reuse indexed repo-map/ + comments.md if FRESH.
+// On a fresh hit the broker materializes both artifacts and we SKIP discovery entirely.
+// Any doubt / MCP down / useIndex=false => miss => the original discovery runs unchanged.
+let cacheFresh = false
+if (useIndex) {
+  phase('Context lookup')
+  const lk = await agent(P.contextBroker, { label: 'context-broker', phase: 'Context lookup', schema: CONTEXT_LOOKUP_SCHEMA, model: MODELS.contextBroker })
+  cacheFresh = Boolean(lk && lk.status === 'fresh' && lk.materialized)
+  if (lk) log(`context lookup: ${lk.status}${lk.headSha ? ` @ ${String(lk.headSha).slice(0, 8)}` : ''}${cacheFresh ? ' — reusing indexed repo-map/ + comments.md, SKIPPING discovery' : ' — running full discovery'}`)
+  else log('context lookup: broker failed — running full discovery')
+}
+
 // RF-FLOW-3 — Context in parallel (barrier: analyzers depend on repo-map/ and comments.md)
-phase('Context')
-const [mapResult, crawlResult] = await parallel([
-  () => agent(P.cartographer, { label: 'cartographer', phase: 'Context', model: MODELS.cartographer }),
-  () => agent(P.crawler, { label: 'crawler', phase: 'Context', model: MODELS.crawler }),
-])
-if (!mapResult || !crawlResult) {
-  const failed = [!mapResult && 'cartographer (repo-map/)', !crawlResult && 'crawler (comments.md)'].filter(Boolean).join(' and ')
-  throw new Error(`Context phase aborted: ${failed} failed — downstream analysis depends on it and cannot proceed reliably.`)
+// Skipped on a fresh cache hit (the broker already wrote both artifacts).
+if (!cacheFresh) {
+  phase('Context')
+  const [mapResult, crawlResult] = await parallel([
+    () => agent(P.cartographer, { label: 'cartographer', phase: 'Context', model: MODELS.cartographer }),
+    () => agent(P.crawler, { label: 'crawler', phase: 'Context', model: MODELS.crawler }),
+  ])
+  if (!mapResult || !crawlResult) {
+    const failed = [!mapResult && 'cartographer (repo-map/)', !crawlResult && 'crawler (comments.md)'].filter(Boolean).join(' and ')
+    throw new Error(`Context phase aborted: ${failed} failed — downstream analysis depends on it and cannot proceed reliably.`)
+  }
+
+  // Index write-back (M2) — populate the graph from the fresh discovery. Best-effort,
+  // NON-blocking: a failure here must never abort the analysis (invariant: single-artifact
+  // errors are warnings). Skipped on a fresh cache hit (nothing new to index).
+  if (useIndex) {
+    phase('Index write-back')
+    const idx = await agent(P.indexer, { label: 'indexer', phase: 'Index write-back', model: MODELS.indexer })
+    if (!idx) log('WARNING: index write-back failed (non-fatal) — the MCP cache was not updated this run.')
+  }
 }
 
 // RF-FLOW-4/5 — Fan-out analyzers -> verifier -> bounded rework, in a pipeline (no barrier between units)
